@@ -134,3 +134,36 @@ class TestSaveCustomMappingCloud:
         assert json.loads(target.read_text())["Foo (Bar)"] == [12, 34]
         assert m._custom_mappings["Foo (Bar)"] == (12, 34)
         m._custom_mappings.clear()
+
+
+class TestValidCategories:
+    """Bug B: some mappings used FIT categories (33-52) the installed fit_tool
+    doesn't implement, so they silently fell back to TOTAL_BODY instead of their
+    real category."""
+
+    def test_every_mapped_category_is_valid(self) -> None:
+        """Every built-in mapping must use a real FIT ExerciseCategory (0-32) or
+        the UNKNOWN sentinel — an out-of-range category resolves to 'UNKNOWN' and
+        would silently become TOTAL_BODY."""
+        from hevy2garmin.merge import _category_to_string
+        bad = {
+            name: (c, s)
+            for name, (c, s) in HEVY_TO_GARMIN.items()
+            if c != _UNKNOWN_CATEGORY and _category_to_string(c) == "UNKNOWN"
+        }
+        assert not bad, f"mappings with invalid (out-of-range) categories: {bad}"
+
+    def test_cardio_machines_map_to_cardio(self) -> None:
+        """Cardio machines resolve to the CARDIO category, not the TOTAL_BODY
+        fallback they hit before."""
+        from hevy2garmin.merge import _category_to_string
+        for name in ("Cycling", "Treadmill", "Elliptical Trainer", "Rowing Machine"):
+            cat, sub, _ = lookup_exercise(name)
+            assert _category_to_string(cat) == "CARDIO", name
+
+    def test_dumbbell_row_resolves_to_real_subcategory(self) -> None:
+        """Chest Supported Incline Row (Dumbbell) now resolves to a real Row
+        subcategory name instead of a broken out-of-range sub."""
+        from hevy2garmin.merge import _exercise_to_string
+        cat, sub, _ = lookup_exercise("Chest Supported Incline Row (Dumbbell)")
+        assert _exercise_to_string(cat, sub) == "DUMBBELL_ROW"

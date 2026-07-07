@@ -233,7 +233,7 @@ async function handleGarminLoginResponse(data) {
     }
 
     if (data.status === 'rate_limited') {
-        result.innerHTML = '<span style="color: var(--red);">&#10007; Garmin rate-limited this account. Wait a few minutes and try again.</span>';
+        result.innerHTML = '<span style="color: var(--red);">&#10007; Garmin rate-limited this account on their side (separate from your password, your Garmin app still works). It clears on its own, usually within a few hours. Repeated retries just reset the timer, so leave it a while and try once more.</span>';
         return;
     }
 
