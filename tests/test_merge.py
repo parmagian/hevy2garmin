@@ -13,6 +13,8 @@ from hevy2garmin.merge import (
     reset_circuit_breaker,
     _category_to_string,
     _exercise_to_string,
+    _strip_exercise_names,
+    _is_subcategory_rejection,
 )
 
 
@@ -501,6 +503,84 @@ def test_watch_merge_strategy_pushes_and_keeps(mock_gen, mock_desc, mock_rename,
     assert result.delete_after_upload is None
     mock_push.assert_called_once()     # pushed the sets into the watch activity
     mock_rename.assert_called_once()   # renamed + described it in place
+
+
+# ---------------------------------------------------------------------------
+# Resilience: one rejected subcategory must not drop the whole merge
+# ---------------------------------------------------------------------------
+
+def test_strip_exercise_names_nulls_names_keeps_category():
+    """_strip_exercise_names returns a copy with every name nulled, categories kept."""
+    payload = build_exercise_sets_payload(
+        HEVY_WORKOUT, activity_id=1,
+        activity_start_time="2026-03-15 18:00:00", activity_duration_s=45 * 60,
+    )
+    stripped = _strip_exercise_names(payload)
+    # the original still has real names (copy, not mutated)
+    assert any(ex["name"] for s in payload["exerciseSets"] for ex in s["exercises"])
+    for s in stripped["exerciseSets"]:
+        for ex in s["exercises"]:
+            assert ex["name"] is None
+            assert "category" in ex
+
+
+def test_is_subcategory_rejection_detects_garmin_400():
+    assert _is_subcategory_rejection(RuntimeError("API Error 400 - Invalid Sub-Category Passed in the request"))
+    assert _is_subcategory_rejection(Exception("invalid subcategory"))
+    assert not _is_subcategory_rejection(RuntimeError("connection reset"))
+    assert not _is_subcategory_rejection(RuntimeError("PUT failed"))
+
+
+@patch("hevy2garmin.merge.time.sleep")
+@patch("hevy2garmin.merge.find_matching_garmin_activity")
+@patch("hevy2garmin.merge.get_activity_exercise_sets")
+@patch("hevy2garmin.merge.push_exercise_sets")
+@patch("hevy2garmin.merge.rename_activity")
+@patch("hevy2garmin.merge.set_description")
+@patch("hevy2garmin.merge.generate_description")
+def test_subcategory_400_retries_without_names(mock_gen, mock_desc, mock_rename, mock_push, mock_get, mock_find, _sleep):
+    """A subcategory 400 on the atomic PUT retries once with names stripped so the
+    sets still land (merged=True), instead of dropping the entire merge."""
+    reset_circuit_breaker()
+    act = _make_garmin_activity()
+    act["manufacturer"] = "GARMIN"          # watch activity, merge strategy skips the name-verify
+    mock_find.return_value = act
+    mock_get.return_value = {"exerciseSets": []}
+    mock_gen.return_value = "Bench: 3 sets"
+    # first push rejected, the names-stripped retry succeeds
+    mock_push.side_effect = [
+        RuntimeError("API Error 400 - Invalid Sub-Category Passed in the request"),
+        None,
+    ]
+
+    result = attempt_merge(MagicMock(), HEVY_WORKOUT, MagicMock(), watch_strategy="merge")
+
+    assert result.merged is True
+    assert mock_push.call_count == 2
+    retry_payload = mock_push.call_args_list[1].args[2]
+    active = [s for s in retry_payload["exerciseSets"] if s["setType"] == "ACTIVE"]
+    assert active and all(ex["name"] is None for s in active for ex in s["exercises"])
+
+
+@patch("hevy2garmin.merge.time.sleep")
+@patch("hevy2garmin.merge.find_matching_garmin_activity")
+@patch("hevy2garmin.merge.get_activity_exercise_sets")
+@patch("hevy2garmin.merge.push_exercise_sets")
+def test_non_subcategory_error_is_not_retried(mock_push, mock_get, mock_find, _sleep):
+    """A non-subcategory push error (e.g. network) falls back immediately with no
+    stripped-names retry."""
+    reset_circuit_breaker()
+    act = _make_garmin_activity()
+    act["manufacturer"] = "GARMIN"
+    mock_find.return_value = act
+    mock_get.return_value = {"exerciseSets": []}
+    mock_push.side_effect = RuntimeError("connection reset by peer")
+
+    result = attempt_merge(MagicMock(), HEVY_WORKOUT, MagicMock(), watch_strategy="merge")
+
+    assert result.merged is False
+    assert "PUT failed" in result.fallback_reason
+    mock_push.assert_called_once()   # no retry
 
 
 class TestNamesApplied:
