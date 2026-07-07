@@ -6,6 +6,13 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.5.12] - 2026-07-07
+
+### Fixed
+- **Merge dropped every exercise set when Garmin rejected one exercise** ([#199](https://github.com/drkostas/hevy2garmin/issues/199)). The exerciseSets push is atomic, so a single exercise whose (category, subcategory) pair Garmin rejects (a 400 "Invalid Sub-Category") made the whole activity lose its sets, and after three such workouts merge was disabled for the rest of the run. It now retries once with the exercise names stripped (the category is kept, which Garmin always accepts), so the sets, reps and weights still land. Thanks @silas_christopher for the detailed report.
+- **Some exercises showed as "Total Body" instead of their real category** ([#201](https://github.com/drkostas/hevy2garmin/issues/201)). Cardio machines (cycling, treadmill, elliptical, rowing machine and others) and a few rows were mapped to FIT categories the bundled library does not implement, so they fell back to the generic Total Body. They now use valid categories: cardio machines show as Cardio, and the chest-supported dumbbell row shows its real name.
+- **Misleading Garmin rate-limit message** ([#202](https://github.com/drkostas/hevy2garmin/issues/202)). The setup screen said to "wait a few minutes" on a Garmin rate limit, but it is usually a few hours and retrying resets the timer. The message now says so, and makes clear it is on Garmin's side and separate from your password.
+
 ## [0.5.11] - 2026-06-26
 
 ### Added
