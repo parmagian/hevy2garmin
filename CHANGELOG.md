@@ -6,6 +6,18 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.5.13] - 2026-07-09
+
+### Added
+- **Grace period before syncing** ([#205](https://github.com/drkostas/hevy2garmin/issues/205)). Automatic syncs (self-hosted auto-sync and the CLI) now wait `sync.grace_period_minutes` (default 120) after a workout ends before syncing it, so the Garmin watch activity has time to appear and the workout merges into one activity instead of creating a duplicate. Manual "Sync now" ignores the grace period.
+- **Duplicate detection (log-only)** ([#205](https://github.com/drkostas/hevy2garmin/issues/205)). Each sync scans recent workouts and reports any that ended up with both a tool-created and a watch activity for the same session, plus a manual "scan for duplicates" action. It only reports, it does not delete anything.
+
+### Fixed
+- **Fresh uploads that land without heart rate are now retried once and reported** ([#205](https://github.com/drkostas/hevy2garmin/issues/205)). The heart-rate fetch retries once if the first attempt is empty, and an upload that still ends up without HR is counted and logged instead of silently having none.
+
+### Note
+- Merge reliability currently applies to the self-hosted and CLI sync path. Bringing it to the Vercel cron path is tracked in [#206](https://github.com/drkostas/hevy2garmin/issues/206).
+
 ## [0.5.12] - 2026-07-07
 
 ### Fixed
