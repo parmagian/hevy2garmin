@@ -129,3 +129,12 @@ class TestBuildSyncWorkflowYaml:
         assert "repository_dispatch:" in yml
         assert "DATABASE_URL: ${{ secrets.DATABASE_URL }}" in yml
         assert "hevy2garmin sync" in yml
+
+    def test_actions_run_on_node_24(self) -> None:
+        """Pin the generated workflow to Node-24 action majors so it doesn't
+        regress to the deprecated Node-20 versions (checkout@v4, setup-python@v5)."""
+        yml = _build_sync_workflow_yaml(120)
+        assert "actions/checkout@v5" in yml
+        assert "actions/setup-python@v6" in yml
+        assert "actions/checkout@v4" not in yml
+        assert "actions/setup-python@v5" not in yml
