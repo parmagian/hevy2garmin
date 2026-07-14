@@ -6,6 +6,11 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.5.19] - 2026-07-14
+
+### Added
+- Safe Garmin upload recovery ([#227](https://github.com/drkostas/hevy2garmin/pull/227), thanks @donndonn). Uploads that fail mid-request (crash/timeout) are parked in a durable `pending_uploads` table instead of being blindly re-uploaded, so an upload that may have reached Garmin never creates a duplicate. Rename/description/watch-delete resume from checkpoints, same-id deletion is blocked, and delete retries are capped. New CLI and web controls to resolve stuck syncs: reconcile (never uploads, adopts an activity only with a start-time match and upload evidence), retry-failed-only, abandon, mark-synced, and skip.
+
 ## [0.5.18] - 2026-07-14
 
 ### Fixed
