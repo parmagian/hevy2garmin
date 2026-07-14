@@ -8,6 +8,7 @@ uploaded to Garmin Connect.
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from hevy2garmin._isotime import parse_iso
 from pathlib import Path
 
 from fit_tool.fit_file_builder import FitFileBuilder
@@ -91,7 +92,7 @@ def _parse_timestamp(raw: str | None) -> datetime | None:
         return None
     try:
         if "T" in cleaned:
-            return datetime.fromisoformat(cleaned.replace("Z", "+00:00"))
+            return parse_iso(cleaned)
         return datetime.strptime(cleaned, "%Y-%m-%d %H:%M:%S").replace(
             tzinfo=timezone.utc
         )

@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timedelta, timezone
+from hevy2garmin._isotime import parse_iso
 
 logger = logging.getLogger("hevy2garmin")
 
@@ -53,7 +54,7 @@ def cooldown_remaining(db) -> int:
     if not state or not state.get("until"):
         return 0
     try:
-        until = datetime.fromisoformat(state["until"])
+        until = parse_iso(state["until"])
     except Exception:
         return 0
     remaining = (until - _now()).total_seconds()

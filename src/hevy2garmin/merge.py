@@ -15,6 +15,7 @@ import logging
 import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from hevy2garmin._isotime import parse_iso
 
 from hevy2garmin.garmin import (
     find_matching_garmin_activity,
@@ -263,7 +264,7 @@ def build_exercise_sets_payload(
     start_str = activity_start_time.replace(" ", "T")
     if "+" not in start_str and not start_str.endswith("Z"):
         start_str += "+00:00"
-    act_start = datetime.fromisoformat(start_str.replace("Z", "+00:00"))
+    act_start = parse_iso(start_str)
 
     exercises = hevy_workout.get("exercises", [])
     if not exercises:

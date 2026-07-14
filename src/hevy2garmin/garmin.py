@@ -9,6 +9,7 @@ import io
 import logging
 import time
 from pathlib import Path
+from hevy2garmin._isotime import parse_iso
 
 from garminconnect import Garmin
 from garmin_auth import GarminAuth, RateLimiter
@@ -146,7 +147,7 @@ def find_activity_by_start_time(
     from datetime import datetime, timedelta
 
     try:
-        target = datetime.fromisoformat(target_start.replace("Z", "+00:00"))
+        target = parse_iso(target_start)
     except (ValueError, TypeError):
         return None
 
@@ -171,7 +172,7 @@ def find_activity_by_start_time(
         try:
             if "T" not in act_start_str:
                 act_start_str = act_start_str.replace(" ", "T")
-            act_start = datetime.fromisoformat(act_start_str)
+            act_start = parse_iso(act_start_str)
             act_naive = act_start.replace(tzinfo=None) if act_start.tzinfo else act_start
             if abs((act_naive - target_naive).total_seconds()) < window_minutes * 60:
                 return act.get("activityId")
@@ -245,8 +246,8 @@ def find_matching_garmin_activity(
         return None
 
     try:
-        hevy_start = datetime.fromisoformat(start_raw.replace("Z", "+00:00"))
-        hevy_end = datetime.fromisoformat(end_raw.replace("Z", "+00:00"))
+        hevy_start = parse_iso(start_raw)
+        hevy_end = parse_iso(end_raw)
     except (ValueError, TypeError):
         return None
 
@@ -282,7 +283,7 @@ def find_matching_garmin_activity(
         try:
             if "T" not in act_start_str:
                 act_start_str = act_start_str.replace(" ", "T")
-            act_start = datetime.fromisoformat(act_start_str)
+            act_start = parse_iso(act_start_str)
             if act_start.tzinfo is None:
                 act_start = act_start.replace(tzinfo=timezone.utc)
         except (ValueError, TypeError):
@@ -358,8 +359,8 @@ def generate_description(workout: dict, calories: int | None = None, avg_hr: int
         from datetime import datetime
         try:
             fmt = "%Y-%m-%dT%H:%M:%S%z" if "T" in start else "%Y-%m-%d %H:%M:%S"
-            t0 = datetime.fromisoformat(start.replace("Z", "+00:00"))
-            t1 = datetime.fromisoformat(end.replace("Z", "+00:00"))
+            t0 = parse_iso(start)
+            t1 = parse_iso(end)
             duration_s = int((t1 - t0).total_seconds())
         except Exception:
             pass

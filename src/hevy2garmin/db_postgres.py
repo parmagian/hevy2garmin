@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from datetime import datetime
+from hevy2garmin._isotime import parse_iso
 
 from hevy2garmin.db_interface import Database
 
@@ -11,8 +12,8 @@ from hevy2garmin.db_interface import Database
 def _ts_newer(new_ts: str, old_ts: str) -> bool:
     """Compare ISO timestamps safely (handles Z vs +00:00 differences)."""
     try:
-        new_dt = datetime.fromisoformat(new_ts.replace("Z", "+00:00"))
-        old_dt = datetime.fromisoformat(old_ts.replace("Z", "+00:00"))
+        new_dt = parse_iso(new_ts)
+        old_dt = parse_iso(old_ts)
         return new_dt > old_dt
     except (ValueError, TypeError):
         return new_ts > old_ts  # fallback to string comparison

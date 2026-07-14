@@ -11,6 +11,7 @@ from __future__ import annotations
 import logging
 import time as _time
 from datetime import datetime, timedelta
+from hevy2garmin._isotime import parse_iso
 
 from garminconnect import Garmin
 
@@ -92,7 +93,7 @@ def _parse_time(raw: str) -> datetime | None:
         cleaned = raw.replace("Z", "+00:00")
         if "T" not in cleaned:
             cleaned = cleaned.replace(" ", "T")
-        return datetime.fromisoformat(cleaned)
+        return parse_iso(cleaned)
     except (ValueError, TypeError):
         return None
 
