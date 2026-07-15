@@ -122,6 +122,17 @@ class SQLiteDatabase(Database):
                 updated_at TEXT DEFAULT (datetime('now'))
             )
         """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS synced_routines (
+                hevy_routine_id TEXT PRIMARY KEY,
+                garmin_workout_id TEXT,
+                title TEXT,
+                hevy_updated_at TEXT,
+                scheduled_date TEXT,
+                synced_at TEXT DEFAULT (datetime('now')),
+                status TEXT DEFAULT 'success'
+            )
+        """)
         conn.commit()
         return conn
 
@@ -141,6 +152,68 @@ class SQLiteDatabase(Database):
         ).fetchone()
         conn.close()
         return row[0] if row else None
+
+    # ── Routine → Garmin planned-workout tracking ───────────────────────────
+    def get_synced_routine(self, hevy_routine_id: str) -> dict | None:
+        conn = self._get_conn()
+        row = conn.execute(
+            "SELECT hevy_routine_id, garmin_workout_id, title, hevy_updated_at, "
+            "scheduled_date, synced_at, status FROM synced_routines "
+            "WHERE hevy_routine_id = ?",
+            (hevy_routine_id,),
+        ).fetchone()
+        conn.close()
+        if row is None:
+            return None
+        keys = ("hevy_routine_id", "garmin_workout_id", "title", "hevy_updated_at",
+                "scheduled_date", "synced_at", "status")
+        return dict(zip(keys, row))
+
+    def is_routine_synced(self, hevy_routine_id: str, hevy_updated_at: str | None = None) -> bool:
+        record = self.get_synced_routine(hevy_routine_id)
+        if record is None:
+            return False
+        if hevy_updated_at and record.get("hevy_updated_at"):
+            # Edited on Hevy since last sync → treat as not synced (re-create).
+            return not _ts_newer(hevy_updated_at, record["hevy_updated_at"])
+        return True
+
+    def mark_routine_synced(
+        self,
+        hevy_routine_id: str,
+        garmin_workout_id: str | None = None,
+        title: str = "",
+        hevy_updated_at: str | None = None,
+        scheduled_date: str | None = None,
+    ) -> None:
+        conn = self._get_conn()
+        conn.execute(
+            """
+            INSERT INTO synced_routines
+                (hevy_routine_id, garmin_workout_id, title, hevy_updated_at, scheduled_date, status)
+            VALUES (?, ?, ?, ?, ?, 'success')
+            ON CONFLICT(hevy_routine_id) DO UPDATE SET
+                garmin_workout_id = excluded.garmin_workout_id,
+                title = excluded.title,
+                hevy_updated_at = excluded.hevy_updated_at,
+                scheduled_date = excluded.scheduled_date,
+                synced_at = datetime('now'),
+                status = 'success'
+            """,
+            (hevy_routine_id, garmin_workout_id, title, hevy_updated_at, scheduled_date),
+        )
+        conn.commit()
+        conn.close()
+
+    def delete_synced_routine(self, hevy_routine_id: str) -> bool:
+        conn = self._get_conn()
+        cur = conn.execute(
+            "DELETE FROM synced_routines WHERE hevy_routine_id = ?", (hevy_routine_id,)
+        )
+        deleted = cur.rowcount > 0
+        conn.commit()
+        conn.close()
+        return deleted
 
     def mark_synced(
         self,

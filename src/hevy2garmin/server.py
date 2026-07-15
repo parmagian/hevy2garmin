@@ -22,7 +22,7 @@ from hevy2garmin.auth import auth_enabled, verify_session, sign_session, check_p
 from hevy2garmin.config import is_configured, load_config, save_config
 from hevy2garmin.demo import is_demo_mode
 from hevy2garmin.ratelimit import record_rate_limit, cooldown_remaining, clear_rate_limit, format_cooldown
-from hevy2garmin.sync import sync
+from hevy2garmin.sync import sync, sync_routines
 
 logger = logging.getLogger("hevy2garmin")
 
@@ -1291,6 +1291,55 @@ async def api_sync(request: Request):
     _last_sync_time = datetime.now(timezone.utc)
     _record_sync_log(result, trigger=f"manual ({scope})")
     return _render("partials/sync_result.html", result=result)
+
+
+@app.get("/routines", response_class=HTMLResponse)
+async def routines_page(request: Request):
+    """List Hevy routines and their sync status."""
+    config = load_config()
+    routines: list[dict] = []
+    fetch_error = None
+    try:
+        from hevy2garmin.hevy import HevyClient
+
+        _db = db.get_db()
+        data = HevyClient(api_key=config.get("hevy_api_key")).get_routines(page=1, page_size=100)
+        for r in data.get("routines", []):
+            routines.append({
+                "title": r.get("title") or r.get("name") or "Routine",
+                "exercise_count": len(r.get("exercises", [])),
+                "synced": _db.get_synced_routine(r.get("id", "")) is not None,
+            })
+    except Exception as e:
+        fetch_error = str(e)
+    return _render("routines.html", request=request, routines=routines, fetch_error=fetch_error)
+
+
+@app.post("/api/routines/sync", response_class=HTMLResponse)
+async def api_routines_sync(request: Request):
+    """Create Garmin planned workouts from all Hevy routines."""
+    if is_demo_mode():
+        return HTMLResponse('<div class="toast toast-success">Sync disabled in demo mode.</div>')
+
+    form = await request.form()
+    schedule_date = (form.get("date") or "").strip() or None
+
+    if not _acquire_sync_lock():
+        return HTMLResponse('<div class="toast toast-error">Another sync is already running. Please wait.</div>')
+
+    try:
+        result = sync_routines(dry_run=False, schedule_date=schedule_date)
+    except Exception as e:
+        return HTMLResponse(f'<div class="toast toast-error">Routine sync failed: {e}</div>')
+    finally:
+        _sync_executing.release()
+
+    msg = (
+        f"{result['created']} created, {result['skipped']} skipped, {result['failed']} failed"
+        + (f", {result['scheduled']} scheduled" if result.get("scheduled") else "")
+    )
+    cls = "toast-error" if result["failed"] else "toast-success"
+    return HTMLResponse(f'<div class="toast {cls}">Routine sync complete: {msg}</div>')
 
 
 @app.post("/api/sync/{workout_id}", response_class=HTMLResponse)

@@ -38,9 +38,47 @@ def _make_db(tmp_path):
                 cur.execute("DELETE FROM synced_workouts")
                 cur.execute("DELETE FROM sync_log")
                 cur.execute("DELETE FROM hr_cache")
+                cur.execute("DELETE FROM synced_routines")
             conn.commit()
         return db
     return SQLiteDatabase(tmp_path / "test.db")
+
+
+class TestRoutineTracking:
+    def test_not_synced_initially(self, tmp_path: Path) -> None:
+        db = _make_db(tmp_path)
+        assert db.is_routine_synced("r-unknown") is False
+        assert db.get_synced_routine("r-unknown") is None
+
+    def test_mark_then_check(self, tmp_path: Path) -> None:
+        db = _make_db(tmp_path)
+        db.mark_routine_synced("r1", garmin_workout_id="w9", title="Push",
+                               hevy_updated_at="2026-01-01T00:00:00Z")
+        assert db.is_routine_synced("r1") is True
+        record = db.get_synced_routine("r1")
+        assert record["garmin_workout_id"] == "w9"
+        assert record["title"] == "Push"
+
+    def test_stale_when_edited_since(self, tmp_path: Path) -> None:
+        db = _make_db(tmp_path)
+        db.mark_routine_synced("r1", hevy_updated_at="2026-01-01T00:00:00Z")
+        # Edited later on Hevy → treated as not synced (will be recreated).
+        assert db.is_routine_synced("r1", "2026-02-01T00:00:00Z") is False
+        # Unchanged timestamp → still synced.
+        assert db.is_routine_synced("r1", "2026-01-01T00:00:00Z") is True
+
+    def test_upsert_updates_record(self, tmp_path: Path) -> None:
+        db = _make_db(tmp_path)
+        db.mark_routine_synced("r1", garmin_workout_id="w1", title="Old")
+        db.mark_routine_synced("r1", garmin_workout_id="w2", title="New")
+        assert db.get_synced_routine("r1")["garmin_workout_id"] == "w2"
+
+    def test_delete(self, tmp_path: Path) -> None:
+        db = _make_db(tmp_path)
+        db.mark_routine_synced("r1", garmin_workout_id="w1")
+        assert db.delete_synced_routine("r1") is True
+        assert db.is_routine_synced("r1") is False
+        assert db.delete_synced_routine("r1") is False
 
 
 class TestSyncTracking:

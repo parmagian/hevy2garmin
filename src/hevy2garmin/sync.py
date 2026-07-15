@@ -17,16 +17,20 @@ from hevy2garmin.garmin import (
     GarminUploadRejected,
     activity_matches_start_time,
     activities_for_workout,
+    create_workout,
     delete_activity,
+    delete_workout,
     find_activity_by_start_time,
     generate_description,
     get_client,
     rename_activity,
+    schedule_workout,
     set_description,
     upload_fit,
 )
 from hevy2garmin.hevy import HevyClient
 from hevy2garmin.mapper import lookup_exercise
+from hevy2garmin.routine import routine_to_garmin_workout
 from hevy2garmin.merge import attempt_merge, reset_circuit_breaker
 from hevy2garmin.db_interface import Database
 
@@ -684,4 +688,127 @@ def sync(
             trigger=trigger,
         )
 
+    return stats
+
+
+def fetch_all_routines(hevy: HevyClient, page_size: int = 10) -> list[dict]:
+    """Fetch every Hevy routine (paginated). Returns a list of routine dicts."""
+    routines: list[dict] = []
+    page = 1
+    while True:
+        data = hevy.get_routines(page, page_size)
+        batch = data.get("routines", [])
+        routines.extend(batch)
+        logger.info("  Routines page %d/%s — %d", page, data.get("page_count", "?"), len(batch))
+        if page >= data.get("page_count", page):
+            break
+        page += 1
+    return routines
+
+
+def sync_routines(
+    config: dict[str, Any] | None = None,
+    dry_run: bool = False,
+    schedule_date: str | None = None,
+    **overrides: Any,
+) -> dict:
+    """Sync Hevy routines (templates) to Garmin as planned workouts.
+
+    Each Hevy routine becomes a planned workout in the Garmin Workouts library
+    (not an uploaded activity). Already-synced routines are skipped unless edited
+    on Hevy since — those are deleted and recreated. When ``schedule_date`` (an
+    ISO ``YYYY-MM-DD``) is given, each created workout is also scheduled onto the
+    Garmin calendar for that date; otherwise only the library entry is created.
+
+    Args:
+        config: Config dict (loaded from file if None).
+        dry_run: Build payloads and log them, but don't call Garmin.
+        schedule_date: Optional ``YYYY-MM-DD`` to schedule the workouts.
+        **overrides: Override config values (hevy_api_key, garmin_email, garmin_password).
+
+    Returns:
+        Dict with stats: created, skipped, failed, scheduled, total.
+    """
+    cfg = config or load_config()
+    candidate_store = db.get_db() if callable(getattr(db, "get_db", None)) else None
+    store = candidate_store if isinstance(candidate_store, Database) else db
+    hevy_api_key = overrides.get("hevy_api_key") or cfg.get("hevy_api_key")
+    garmin_email = overrides.get("garmin_email") or cfg.get("garmin_email")
+    garmin_password = overrides.get("garmin_password") or cfg.get("garmin_password", "")
+    garmin_token_dir = cfg.get("garmin_token_dir", "~/.garminconnect")
+    weight_unit = cfg.get("sync", {}).get("weight_unit", "kilogram")
+
+    hevy = HevyClient(api_key=hevy_api_key)
+    routines = fetch_all_routines(hevy)
+    logger.info("Fetched %d routines to process", len(routines))
+
+    garmin_client = None
+    if not dry_run:
+        logger.info("Authenticating with Garmin Connect...")
+        garmin_client = get_client(garmin_email, garmin_password, garmin_token_dir)
+        logger.info("Authenticated successfully")
+
+    stats = {
+        "created": 0,
+        "skipped": 0,
+        "failed": 0,
+        "scheduled": 0,
+        "total": len(routines),
+    }
+
+    for routine in routines:
+        rid = routine.get("id", "unknown")
+        title = routine.get("title") or routine.get("name") or "Routine"
+        updated_at = routine.get("updated_at")
+
+        existing = store.get_synced_routine(rid)
+        if existing and store.is_routine_synced(rid, updated_at):
+            logger.debug("Skipping routine %s (%s) — already synced", rid, title)
+            stats["skipped"] += 1
+            continue
+
+        try:
+            payload = routine_to_garmin_workout(routine, weight_unit=weight_unit)
+            if dry_run:
+                logger.info(
+                    "[dry-run] Would create Garmin workout '%s' with %d step(s)",
+                    title,
+                    len(payload["workoutSegments"][0]["workoutSteps"]),
+                )
+                stats["created"] += 1
+                continue
+
+            # Routine was edited on Hevy — drop the stale Garmin workout first.
+            if existing and existing.get("garmin_workout_id"):
+                try:
+                    delete_workout(garmin_client, existing["garmin_workout_id"])
+                except Exception:
+                    logger.warning("  Could not delete stale workout %s", existing["garmin_workout_id"])
+
+            workout_id = create_workout(garmin_client, payload)
+            if workout_id is None:
+                logger.warning("  Garmin did not return a workoutId for '%s'", title)
+                stats["failed"] += 1
+                continue
+
+            if schedule_date:
+                schedule_workout(garmin_client, workout_id, schedule_date)
+                stats["scheduled"] += 1
+
+            store.mark_routine_synced(
+                rid,
+                garmin_workout_id=str(workout_id),
+                title=title,
+                hevy_updated_at=updated_at,
+                scheduled_date=schedule_date,
+            )
+            stats["created"] += 1
+        except Exception:
+            logger.exception("Failed to sync routine %s (%s)", rid, title)
+            stats["failed"] += 1
+
+    logger.info(
+        "Routine sync done — created=%d skipped=%d failed=%d scheduled=%d",
+        stats["created"], stats["skipped"], stats["failed"], stats["scheduled"],
+    )
     return stats

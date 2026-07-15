@@ -1,0 +1,52 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="page-header">
+  <h1>Routines</h1>
+  <p class="subtitle">Create Garmin planned workouts from your Hevy routines.</p>
+</div>
+
+<div class="card" style="margin-bottom:16px;">
+  <form hx-post="/api/routines/sync" hx-target="#routines-result" hx-indicator="#routines-spinner"
+        style="display:flex; gap:12px; align-items:center; flex-wrap:wrap;">
+    <button type="submit" class="btn btn-primary">Sync all routines</button>
+    <label style="display:flex; gap:6px; align-items:center; color:var(--text-muted); font-size:14px;">
+      Schedule date (optional):
+      <input type="date" name="date" style="background:var(--bg-primary); color:var(--text); border:1px solid var(--border); border-radius:var(--radius-sm); padding:6px 8px;">
+    </label>
+    <span id="routines-spinner" class="htmx-indicator" style="color:var(--text-muted);">Syncing…</span>
+  </form>
+  <div id="routines-result" style="margin-top:12px;"></div>
+</div>
+
+{% if fetch_error %}
+<div class="toast toast-error">Could not load routines: {{ fetch_error }}</div>
+{% else %}
+<div class="card">
+  {% if routines %}
+  <table style="width:100%; border-collapse:collapse;">
+    <thead>
+      <tr style="text-align:left; color:var(--text-muted); font-size:13px;">
+        <th style="padding:8px;">Routine</th>
+        <th style="padding:8px;">Exercises</th>
+        <th style="padding:8px;">Status</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for r in routines %}
+      <tr style="border-top:1px solid var(--border);">
+        <td style="padding:8px;">{{ r.title }}</td>
+        <td style="padding:8px;">{{ r.exercise_count }}</td>
+        <td style="padding:8px;">
+          {% if r.synced %}<span style="color:var(--green);">✓ synced</span>
+          {% else %}<span style="color:var(--text-muted);">not synced</span>{% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p style="color:var(--text-muted);">No routines found in your Hevy account.</p>
+  {% endif %}
+</div>
+{% endif %}
+{% endblock %}
