@@ -23,11 +23,26 @@ step per set instead, which is equally valid and preserves per-set weights.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 
 from hevy2garmin.mapper import fit_exercise_strings, lookup_exercise
 
 logger = logging.getLogger("hevy2garmin")
+
+
+def workout_content_hash(payload: dict) -> str:
+    """Stable SHA-256 of a Garmin workout payload, for change detection.
+
+    Hashing the *generated payload* (not the raw Hevy routine) means the hash
+    changes both when the routine's exercises/sets change AND when this builder
+    changes how it emits steps (e.g. adding rest steps). That lets ``sync_routines``
+    re-create a workout whenever its content would differ, without relying on
+    Hevy's ``updated_at`` or a manual ``--force``.
+    """
+    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 # --- Garmin workout-service enums (validated against a real export 2026-07-16) #
 SPORT_TYPE_STRENGTH = {"sportTypeId": 5, "sportTypeKey": "strength_training"}

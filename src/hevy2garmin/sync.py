@@ -30,7 +30,7 @@ from hevy2garmin.garmin import (
 )
 from hevy2garmin.hevy import HevyClient
 from hevy2garmin.mapper import lookup_exercise
-from hevy2garmin.routine import routine_to_garmin_workout
+from hevy2garmin.routine import routine_to_garmin_workout, workout_content_hash
 from hevy2garmin.merge import attempt_merge, reset_circuit_breaker
 from hevy2garmin.db_interface import Database
 
@@ -716,18 +716,20 @@ def sync_routines(
     """Sync Hevy routines (templates) to Garmin as planned workouts.
 
     Each Hevy routine becomes a planned workout in the Garmin Workouts library
-    (not an uploaded activity). Already-synced routines are skipped unless edited
-    on Hevy since — those are deleted and recreated. When ``schedule_date`` (an
-    ISO ``YYYY-MM-DD``) is given, each created workout is also scheduled onto the
+    (not an uploaded activity). A routine is skipped when the workout payload it
+    now produces hashes identically to the last one synced; otherwise the old
+    Garmin workout is deleted and recreated. Because the hash covers the
+    *generated payload*, changes to this builder (e.g. new rest steps) re-sync
+    automatically without ``--force``. When ``schedule_date`` (an ISO
+    ``YYYY-MM-DD``) is given, each created workout is also scheduled onto the
     Garmin calendar for that date; otherwise only the library entry is created.
 
     Args:
         config: Config dict (loaded from file if None).
         dry_run: Build payloads and log them, but don't call Garmin.
         schedule_date: Optional ``YYYY-MM-DD`` to schedule the workouts.
-        force: Re-create every routine even if already synced and unchanged
-            (deletes the old Garmin workout first). Use after changing how the
-            payload is built — e.g. to pick up newly added rest steps.
+        force: Re-create every routine even when its payload hash is unchanged
+            (deletes the old Garmin workout first).
         **overrides: Override config values (hevy_api_key, garmin_email, garmin_password).
 
     Returns:
@@ -768,16 +770,21 @@ def sync_routines(
         title = routine.get("title") or routine.get("name") or "Routine"
         updated_at = routine.get("updated_at")
 
-        existing = store.get_synced_routine(rid)
-        if not force and existing and store.is_routine_synced(rid, updated_at):
-            logger.debug("Skipping routine %s (%s) — already synced", rid, title)
-            stats["skipped"] += 1
-            continue
-
         try:
             payload = routine_to_garmin_workout(
                 routine, weight_unit=weight_unit, default_rest_seconds=default_rest_seconds
             )
+            content_hash = workout_content_hash(payload)
+
+            # Skip when the generated payload is byte-for-byte what we last synced.
+            # Hashing the payload (not Hevy's updated_at) also re-syncs when this
+            # builder changes — e.g. after adding rest steps. --force overrides it.
+            existing = store.get_synced_routine(rid)
+            if not force and existing and existing.get("content_hash") == content_hash:
+                logger.debug("Skipping routine %s (%s) — unchanged", rid, title)
+                stats["skipped"] += 1
+                continue
+
             if dry_run:
                 logger.info(
                     "[dry-run] Would create Garmin workout '%s' with %d step(s)",
@@ -787,7 +794,7 @@ def sync_routines(
                 stats["created"] += 1
                 continue
 
-            # Routine was edited on Hevy — drop the stale Garmin workout first.
+            # Content changed (or forced) — drop the stale Garmin workout first.
             if existing and existing.get("garmin_workout_id"):
                 try:
                     delete_workout(garmin_client, existing["garmin_workout_id"])
@@ -810,6 +817,7 @@ def sync_routines(
                 title=title,
                 hevy_updated_at=updated_at,
                 scheduled_date=schedule_date,
+                content_hash=content_hash,
             )
             stats["created"] += 1
         except Exception:

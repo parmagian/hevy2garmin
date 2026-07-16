@@ -150,6 +150,7 @@ class Database(ABC):
         title: str = "",
         hevy_updated_at: str | None = None,
         scheduled_date: str | None = None,
+        content_hash: str | None = None,
     ) -> None:
         """Record a routine synced to a Garmin planned workout."""
 

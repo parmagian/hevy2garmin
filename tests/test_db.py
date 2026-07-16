@@ -80,6 +80,14 @@ class TestRoutineTracking:
         assert db.is_routine_synced("r1") is False
         assert db.delete_synced_routine("r1") is False
 
+    def test_content_hash_round_trip(self, tmp_path: Path) -> None:
+        db = _make_db(tmp_path)
+        db.mark_routine_synced("r1", garmin_workout_id="w1", content_hash="abc123")
+        assert db.get_synced_routine("r1")["content_hash"] == "abc123"
+        # Upsert updates the hash.
+        db.mark_routine_synced("r1", garmin_workout_id="w1", content_hash="def456")
+        assert db.get_synced_routine("r1")["content_hash"] == "def456"
+
 
 class TestSyncTracking:
     def test_not_synced_initially(self, tmp_path: Path) -> None:

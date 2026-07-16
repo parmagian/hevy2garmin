@@ -133,10 +133,12 @@ class PostgresDatabase(Database):
                         title TEXT,
                         hevy_updated_at TEXT,
                         scheduled_date TEXT,
+                        content_hash TEXT,
                         synced_at TIMESTAMPTZ DEFAULT NOW(),
                         status VARCHAR(20) DEFAULT 'success'
                     )
                 """)
+                cur.execute("ALTER TABLE synced_routines ADD COLUMN IF NOT EXISTS content_hash TEXT")
             conn.commit()
 
     def is_synced(self, hevy_id: str) -> bool:
@@ -173,7 +175,7 @@ class PostgresDatabase(Database):
             with conn.cursor() as cur:
                 cur.execute(
                     "SELECT hevy_routine_id, garmin_workout_id, title, hevy_updated_at, "
-                    "scheduled_date, synced_at, status FROM synced_routines "
+                    "scheduled_date, content_hash, synced_at, status FROM synced_routines "
                     "WHERE hevy_routine_id = %s",
                     (hevy_routine_id,),
                 )
@@ -195,23 +197,25 @@ class PostgresDatabase(Database):
         title: str = "",
         hevy_updated_at: str | None = None,
         scheduled_date: str | None = None,
+        content_hash: str | None = None,
     ) -> None:
         with self._get_conn() as conn:
             with conn.cursor() as cur:
                 cur.execute(
                     """
                     INSERT INTO synced_routines
-                        (hevy_routine_id, garmin_workout_id, title, hevy_updated_at, scheduled_date, status)
-                    VALUES (%s, %s, %s, %s, %s, 'success')
+                        (hevy_routine_id, garmin_workout_id, title, hevy_updated_at, scheduled_date, content_hash, status)
+                    VALUES (%s, %s, %s, %s, %s, %s, 'success')
                     ON CONFLICT (hevy_routine_id) DO UPDATE SET
                         garmin_workout_id = EXCLUDED.garmin_workout_id,
                         title = EXCLUDED.title,
                         hevy_updated_at = EXCLUDED.hevy_updated_at,
                         scheduled_date = EXCLUDED.scheduled_date,
+                        content_hash = EXCLUDED.content_hash,
                         synced_at = NOW(),
                         status = 'success'
                     """,
-                    (hevy_routine_id, garmin_workout_id, title, hevy_updated_at, scheduled_date),
+                    (hevy_routine_id, garmin_workout_id, title, hevy_updated_at, scheduled_date, content_hash),
                 )
             conn.commit()
 

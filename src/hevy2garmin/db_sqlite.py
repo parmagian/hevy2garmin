@@ -129,10 +129,16 @@ class SQLiteDatabase(Database):
                 title TEXT,
                 hevy_updated_at TEXT,
                 scheduled_date TEXT,
+                content_hash TEXT,
                 synced_at TEXT DEFAULT (datetime('now')),
                 status TEXT DEFAULT 'success'
             )
         """)
+        # Migration: add content_hash to routine tables created before it existed.
+        try:
+            conn.execute("ALTER TABLE synced_routines ADD COLUMN content_hash TEXT")
+        except Exception:
+            pass  # Column already exists
         conn.commit()
         return conn
 
@@ -158,7 +164,7 @@ class SQLiteDatabase(Database):
         conn = self._get_conn()
         row = conn.execute(
             "SELECT hevy_routine_id, garmin_workout_id, title, hevy_updated_at, "
-            "scheduled_date, synced_at, status FROM synced_routines "
+            "scheduled_date, content_hash, synced_at, status FROM synced_routines "
             "WHERE hevy_routine_id = ?",
             (hevy_routine_id,),
         ).fetchone()
@@ -166,7 +172,7 @@ class SQLiteDatabase(Database):
         if row is None:
             return None
         keys = ("hevy_routine_id", "garmin_workout_id", "title", "hevy_updated_at",
-                "scheduled_date", "synced_at", "status")
+                "scheduled_date", "content_hash", "synced_at", "status")
         return dict(zip(keys, row))
 
     def is_routine_synced(self, hevy_routine_id: str, hevy_updated_at: str | None = None) -> bool:
@@ -185,22 +191,24 @@ class SQLiteDatabase(Database):
         title: str = "",
         hevy_updated_at: str | None = None,
         scheduled_date: str | None = None,
+        content_hash: str | None = None,
     ) -> None:
         conn = self._get_conn()
         conn.execute(
             """
             INSERT INTO synced_routines
-                (hevy_routine_id, garmin_workout_id, title, hevy_updated_at, scheduled_date, status)
-            VALUES (?, ?, ?, ?, ?, 'success')
+                (hevy_routine_id, garmin_workout_id, title, hevy_updated_at, scheduled_date, content_hash, status)
+            VALUES (?, ?, ?, ?, ?, ?, 'success')
             ON CONFLICT(hevy_routine_id) DO UPDATE SET
                 garmin_workout_id = excluded.garmin_workout_id,
                 title = excluded.title,
                 hevy_updated_at = excluded.hevy_updated_at,
                 scheduled_date = excluded.scheduled_date,
+                content_hash = excluded.content_hash,
                 synced_at = datetime('now'),
                 status = 'success'
             """,
-            (hevy_routine_id, garmin_workout_id, title, hevy_updated_at, scheduled_date),
+            (hevy_routine_id, garmin_workout_id, title, hevy_updated_at, scheduled_date, content_hash),
         )
         conn.commit()
         conn.close()

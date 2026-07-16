@@ -9,7 +9,7 @@ from hevy2garmin import sync as sync_module
 from hevy2garmin.db_sqlite import SQLiteDatabase
 from hevy2garmin.garmin import create_workout, delete_workout, schedule_workout
 from hevy2garmin.mapper import fit_exercise_strings
-from hevy2garmin.routine import routine_to_garmin_workout
+from hevy2garmin.routine import routine_to_garmin_workout, workout_content_hash
 
 
 class TestFitExerciseStrings:
@@ -233,16 +233,36 @@ class TestSyncRoutines:
         create_mock.assert_called_once()
         assert store.get_synced_routine("r1")["garmin_workout_id"] == "777"
 
-    def test_skips_already_synced(self, tmp_path: Path) -> None:
+    def _hash_for(self, routine: dict) -> str:
+        # Mirror how sync_routines builds the payload (no timing config → 75s default).
+        payload = routine_to_garmin_workout(routine, weight_unit="kilogram", default_rest_seconds=75)
+        return workout_content_hash(payload)
+
+    def test_skips_when_hash_unchanged(self, tmp_path: Path) -> None:
         routines = [{"id": "r1", "title": "Push", "updated_at": "2026-01-01T00:00:00Z", "exercises": []}]
         store, create_mock, _, patches = self._patched(tmp_path, routines)
         store.mark_routine_synced("r1", garmin_workout_id="777",
-                                  hevy_updated_at="2026-01-01T00:00:00Z")
+                                  content_hash=self._hash_for(routines[0]))
         with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], patches[6]:
             result = sync_module.sync_routines()
         assert result["skipped"] == 1
         assert result["created"] == 0
         create_mock.assert_not_called()
+
+    def test_resyncs_when_hash_changed(self, tmp_path: Path) -> None:
+        routines = [{"id": "r1", "title": "Push", "updated_at": "2026-01-01T00:00:00Z", "exercises": []}]
+        store, create_mock, _, patches = self._patched(tmp_path, routines)
+        delete_mock = MagicMock()
+        # Stored under a stale hash → payload differs → recreate.
+        store.mark_routine_synced("r1", garmin_workout_id="555", content_hash="stale-hash")
+        with patches[0], patches[1], patches[2], patches[3], patches[4], \
+                patch.object(sync_module, "delete_workout", delete_mock), patches[6]:
+            result = sync_module.sync_routines()
+        assert result["created"] == 1
+        assert result["skipped"] == 0
+        create_mock.assert_called_once()
+        delete_mock.assert_called_once_with(delete_mock.call_args[0][0], "555")
+        assert store.get_synced_routine("r1")["content_hash"] == self._hash_for(routines[0])
 
     def test_schedule_when_date_given(self, tmp_path: Path) -> None:
         routines = [{"id": "r1", "title": "Push", "updated_at": "2026-01-01T00:00:00Z", "exercises": []}]
