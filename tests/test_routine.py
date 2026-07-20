@@ -412,3 +412,16 @@ class TestScheduleRoutine:
         with patches[0], patches[1], patches[2], patches[3]:
             with pytest.raises(ValueError):
                 sync_module.schedule_routine("r1", [])
+
+
+class TestDbFacade:
+    def test_get_synced_routine_facade_delegates(self) -> None:
+        # Regression: the `db` module facade must expose get_synced_routine, else
+        # `hevy2garmin sync-routines --list` crashes (it calls db.get_synced_routine).
+        from hevy2garmin import db as db_facade
+
+        store = MagicMock()
+        store.get_synced_routine.return_value = {"garmin_workout_id": "w1"}
+        with patch.object(db_facade, "get_db", return_value=store):
+            assert db_facade.get_synced_routine("r1") == {"garmin_workout_id": "w1"}
+            store.get_synced_routine.assert_called_once_with("r1")

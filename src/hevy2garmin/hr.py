@@ -162,6 +162,11 @@ def fetch_activity_hr(
         logger.debug("activity HR fetch failed for %s: %s", activity_id, exc)
         return []
 
+    # Tolerate a small offset between the Hevy workout window and the watch's
+    # own recording clock (#244): a strict in-window match dropped every sample
+    # when the two differed even slightly, which then hard-failed Replace. The
+    # graceful merge fallback in sync_one_workout covers larger gaps.
+    window_buffer_ms = 180_000  # 3 minutes
     samples: list[dict] = []
     for record in fit_file.records:
         message = record.message
@@ -180,7 +185,7 @@ def fetch_activity_hr(
             bpm_int = int(bpm)
         except (TypeError, ValueError):
             continue
-        if start_ms <= timestamp_ms <= end_ms and 0 < bpm_int < 256:
+        if (start_ms - window_buffer_ms) <= timestamp_ms <= (end_ms + window_buffer_ms) and 0 < bpm_int < 256:
             samples.append({
                 "time": max(0.0, (timestamp_ms - start_ms) / 1000.0),
                 "hr": bpm_int,

@@ -372,18 +372,79 @@ def sync_one_workout(
         merge_fallback = False
 
     if merge_delete_id is not None and not dry_run:
-        # Deletion is allowed only after the best-known source HR is durable.
-        # This runs even when HR embedding is disabled: disabling fusion should
-        # not discard the only recoverable high-resolution recording.
-        from hevy2garmin.hr import require_activity_hr_backup
+        # Replace wants to delete the watch activity. That is only safe once the
+        # watch's high-resolution HR is durably backed up so it can be embedded
+        # in the named replacement. Runs even with HR embedding disabled:
+        # disabling fusion must not discard the only recoverable recording.
+        from hevy2garmin.hr import HRBackupError, backup_activity_hr
 
-        protected_source_hr = require_activity_hr_backup(
-            merge_store,
-            garmin_client,
-            workout,
-            merge_delete_id,
-            _hr_limiter,
-        )
+        try:
+            protected_source_hr = backup_activity_hr(
+                merge_store, garmin_client, workout, merge_delete_id, _hr_limiter,
+            ) or None
+        except HRBackupError as exc:
+            logger.warning(
+                "  ⚠ Could not durably back up HR from watch activity %s: %s",
+                merge_delete_id, exc,
+            )
+            protected_source_hr = None
+
+        if protected_source_hr is None:
+            # The watch's hi-res HR could not be preserved (e.g. the FIT has no
+            # per-record HR, or the download failed). Deleting the watch copy
+            # would lose that HR for good, so instead of aborting the whole sync
+            # (#244 regression) fall back to merging the sets into the watch
+            # activity in place: the watch and its HR stay, the structured sets
+            # land, and the exercise names show as placeholders. Always syncs and
+            # never loses HR — only the named-exercise nicety is dropped when the
+            # HR cannot be preserved.
+            logger.info(
+                "  ⚠ Hi-res HR unavailable for watch activity %s; keeping it and "
+                "merging sets in place instead of replacing (names may show as Unknown)",
+                merge_delete_id,
+            )
+            fallback = attempt_merge(
+                garmin_client,
+                workout,
+                merge_store,
+                overlap_threshold=merge_overlap_pct,
+                max_drift_minutes=merge_max_drift_min,
+                activity_types=merge_activity_types,
+                watch_strategy="merge",
+            )
+            if fallback.merged:
+                fit_stats = _estimate_fit_stats(workout)
+                merge_store.mark_synced(
+                    hevy_id=wid,
+                    garmin_activity_id=str(fallback.activity_id),
+                    title=title,
+                    calories=fit_stats.get("calories"),
+                    avg_hr=fit_stats.get("avg_hr"),
+                    hevy_updated_at=workout.get("updated_at"),
+                    sync_method="merge",
+                )
+                logger.info(
+                    "  ⚡ Merged sets into watch activity %s (HR preserved in place)",
+                    fallback.activity_id,
+                )
+                return SyncOneResult(
+                    status="synced",
+                    activity_id=fallback.activity_id,
+                    sync_method="merge",
+                    merged=True,
+                    calories=fit_stats.get("calories"),
+                    avg_hr=fit_stats.get("avg_hr"),
+                )
+            # In-place merge also failed. Do NOT delete the watch activity —
+            # leave it intact and upload a fresh named activity alongside it, so
+            # the workout still syncs and nothing is lost.
+            logger.warning(
+                "  In-place merge fallback failed (%s); uploading a named activity "
+                "without removing the watch copy",
+                fallback.fallback_reason,
+            )
+            merge_delete_id = None
+            merge_forced_fresh = True
 
     hr_samples = None
     if not dry_run and hr_fusion_on:
