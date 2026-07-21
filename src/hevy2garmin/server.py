@@ -22,7 +22,7 @@ from hevy2garmin.auth import auth_enabled, verify_session, sign_session, check_p
 from hevy2garmin.config import is_configured, load_config, save_config
 from hevy2garmin.demo import is_demo_mode
 from hevy2garmin.ratelimit import record_rate_limit, cooldown_remaining, clear_rate_limit, format_cooldown
-from hevy2garmin.sync import sync
+from hevy2garmin.sync import sync, sync_routines, routine_schedule_dates, schedule_routine
 
 logger = logging.getLogger("hevy2garmin")
 
@@ -419,7 +419,9 @@ async def logout():
 @app.get("/", response_class=HTMLResponse)
 async def dashboard(request: Request):
     config = load_config()
-    synced_count = db.get_synced_count()
+    terminal_counts = db.get_terminal_counts()
+    synced_count = terminal_counts["uploaded"]
+    terminal_count = terminal_counts["terminal"]
     recent = db.get_recent_synced(5)
 
     # Check garmin_connected FIRST (DB/file check only, no HTTP to Garmin)
@@ -471,10 +473,30 @@ async def dashboard(request: Request):
     except Exception:
         pass
 
+    # Routine summary — all DB-backed (no Hevy call). "pending" needs the total
+    # routine count, cached by the /routines page and by routine sync.
+    routine_stats = {"synced": 0, "scheduled": 0}
+    recent_routines: list = []
+    routines_pending = None
+    try:
+        routine_stats = db.get_routine_stats()
+        recent_routines = db.get_recent_synced_routines(5)
+        cached_total = db.get_app_config("routines_total")
+        if isinstance(cached_total, dict) and isinstance(cached_total.get("count"), int):
+            routines_pending = max(0, cached_total["count"] - routine_stats["synced"])
+    except Exception:
+        logger.warning("Could not build routine summary for dashboard", exc_info=True)
+
     return _render(
         "dashboard.html",
+        routine_stats=routine_stats,
+        recent_routines=recent_routines,
+        routines_pending=routines_pending,
         synced_count=synced_count,
         matched_count=matched_count,
+        terminal_count=terminal_count,
+        manual_count=terminal_counts["manual"],
+        skipped_count=terminal_counts["skipped"],
         hevy_total=hevy_total,
         recent=recent,
         auto_sync=_get_autosync_status(),
@@ -734,9 +756,7 @@ async def workouts_page(request: Request):
 
         # Batch check sync status (1 query instead of N)
         hevy_ids = [w.get("id", "") for w in workouts_raw]
-        synced_map = _db.get_synced_ids(hevy_ids) if hasattr(_db, 'get_synced_ids') else {
-            wid: db.get_garmin_id(wid) for wid in hevy_ids if db.is_synced(wid)
-        }
+        states = _db.get_workout_states(hevy_ids)
         # Check for workouts edited on Hevy since last sync
         stale_ids = set(_db.get_stale_synced(workouts_raw))
 
@@ -749,13 +769,22 @@ async def workouts_page(request: Request):
         for w in workouts_raw:
             w["start_time"] = w.get("start_time") or w.get("startTime", "")
             w["end_time"] = w.get("end_time") or w.get("endTime", "")
-            if w["id"] in synced_map:
-                w["status"] = "uploaded"
-                gid = synced_map[w["id"]]
+            state = states.get(w["id"])
+            if state and state["kind"] == "terminal":
+                terminal_status = state.get("status") or "success"
+                w["status"] = {"success": "uploaded", "manual": "manual", "skipped": "skipped"}.get(terminal_status, "uploaded")
+                w["state_detail"] = state
+                gid = state.get("garmin_activity_id")
                 if gid:
                     w["garmin_match"] = {"garmin_id": gid, "garmin_name": w.get("title", "")}
                 if w["id"] in stale_ids:
                     w["edited_since_sync"] = True
+            elif state and state["kind"] == "pending":
+                phase = state.get("status")
+                w["status"] = "processing" if phase in {"preparing", "processing", "finalizing"} else phase
+                w["state_detail"] = state
+                if state.get("garmin_activity_id"):
+                    w["garmin_match"] = {"garmin_id": state["garmin_activity_id"], "garmin_name": w.get("title", "")}
             else:
                 w["status"] = "pending"
 
@@ -1281,6 +1310,103 @@ async def api_sync(request: Request):
     return _render("partials/sync_result.html", result=result)
 
 
+@app.get("/routines", response_class=HTMLResponse)
+async def routines_page(request: Request):
+    """List Hevy routines and their sync status."""
+    config = load_config()
+    routines: list[dict] = []
+    fetch_error = None
+    try:
+        from hevy2garmin.hevy import HevyClient
+        from hevy2garmin.sync import fetch_all_routines, _cache_routines_total
+
+        _db = db.get_db()
+        hevy = HevyClient(api_key=config.get("hevy_api_key"))
+        all_routines = fetch_all_routines(hevy)
+        _cache_routines_total(_db, len(all_routines))
+        for r in all_routines:
+            record = _db.get_synced_routine(r.get("id", ""))
+            routines.append({
+                "id": r.get("id", ""),
+                "title": r.get("title") or r.get("name") or "Routine",
+                "exercise_count": len(r.get("exercises", [])),
+                "synced": record is not None,
+                "scheduled_date": (record or {}).get("scheduled_date"),
+            })
+    except Exception:
+        logger.exception("Failed to load Hevy routines")
+        fetch_error = "Could not load routines from Hevy. Check your API key and try again."
+    return _render("routines.html", request=request, routines=routines, fetch_error=fetch_error)
+
+
+@app.post("/api/routines/sync", response_class=HTMLResponse)
+async def api_routines_sync(request: Request):
+    """Create Garmin planned workouts from all Hevy routines."""
+    if is_demo_mode():
+        return HTMLResponse('<div class="toast toast-success">Sync disabled in demo mode.</div>')
+
+    form = await request.form()
+    force = form.get("force") in ("1", "true", "on")
+
+    if not _acquire_sync_lock():
+        return HTMLResponse('<div class="toast toast-error">Another sync is already running. Please wait.</div>')
+
+    try:
+        result = sync_routines(dry_run=False, force=force)
+    except Exception:
+        logger.exception("Routine sync failed")
+        return HTMLResponse('<div class="toast toast-error">Routine sync failed. Check the logs for details.</div>')
+    finally:
+        _sync_executing.release()
+
+    msg = (
+        f"{result['created']} created, {result['updated']} updated, "
+        f"{result['skipped']} skipped, {result['failed']} failed"
+        + (f", {result['scheduled']} scheduled" if result.get("scheduled") else "")
+    )
+    cls = "toast-error" if result["failed"] else "toast-success"
+    return HTMLResponse(f'<div class="toast {cls}">Routine sync complete: {msg}</div>')
+
+
+@app.post("/api/routines/{hevy_routine_id}/schedule", response_class=HTMLResponse)
+async def api_routine_schedule(request: Request, hevy_routine_id: str):
+    """Schedule one synced routine on the Garmin calendar (once or recurring weekly)."""
+    if is_demo_mode():
+        return HTMLResponse('<div class="toast toast-success">Scheduling disabled in demo mode.</div>')
+
+    form = await request.form()
+    mode = form.get("mode", "once")
+    try:
+        dates = routine_schedule_dates(
+            mode,
+            date=form.get("date"),
+            weekday=form.get("weekday"),
+            start_date=form.get("start_date"),
+            weeks=form.get("weeks"),
+        )
+    except (ValueError, TypeError) as e:
+        return HTMLResponse(f'<div class="toast toast-error">Invalid schedule: {e}</div>')
+
+    if not _acquire_sync_lock():
+        return HTMLResponse('<div class="toast toast-error">Another sync is already running. Please wait.</div>')
+
+    try:
+        result = schedule_routine(hevy_routine_id, dates)
+    except ValueError as e:
+        return HTMLResponse(f'<div class="toast toast-error">{e}</div>')
+    except Exception:
+        logger.exception("Scheduling routine %s failed", hevy_routine_id)
+        return HTMLResponse('<div class="toast toast-error">Scheduling failed. Check the logs for details.</div>')
+    finally:
+        _sync_executing.release()
+
+    n = result["scheduled"]
+    span = f" ({result['dates'][0]} → {result['dates'][-1]})" if n > 1 else f" on {result['dates'][0]}"
+    return HTMLResponse(
+        f'<div class="toast toast-success">Scheduled {n} session(s){span}.</div>'
+    )
+
+
 @app.post("/api/sync/{workout_id}", response_class=HTMLResponse)
 async def api_sync_single(request: Request, workout_id: str):
     try:
@@ -1348,6 +1474,107 @@ async def api_unsync(request: Request, hevy_id: str):
 
     logger.info("Unsynced workout %s (garmin_id=%s, garmin_deleted=%s)", hevy_id, garmin_id, garmin_deleted)
     return JSONResponse({"ok": True, "garmin_deleted": garmin_deleted})
+
+
+def _valid_hevy_id(hevy_id: str) -> bool:
+    return bool(hevy_id and len(hevy_id) <= 200 and re.fullmatch(r"[A-Za-z0-9._:-]+", hevy_id))
+
+
+def _clear_workout_cache(store) -> None:
+    for page in range(1, 11):
+        store.set_app_config(f"hevy_workouts_page_{page}", {})
+
+
+@app.post("/api/pending/{hevy_id}/reconcile")
+async def api_reconcile_pending(request: Request, hevy_id: str):
+    from fastapi.responses import JSONResponse
+    if not _valid_hevy_id(hevy_id):
+        return JSONResponse({"ok": False, "error": "Invalid workout ID"}, status_code=400)
+    store = db.get_db()
+    if not store.get_pending(hevy_id):
+        return JSONResponse({"ok": False, "error": "No pending operation"}, status_code=404)
+    try:
+        from hevy2garmin.garmin import get_client
+        from hevy2garmin.sync import reconcile_pending
+        config = load_config()
+        result = reconcile_pending(store, get_client(config.get("garmin_email")), hevy_id)
+        return JSONResponse({"ok": True, "status": result.status})
+    except Exception as exc:
+        return JSONResponse({"ok": False, "error": str(exc)[:1000]}, status_code=502)
+
+
+@app.post("/api/pending/{hevy_id}/retry")
+async def api_retry_pending(request: Request, hevy_id: str):
+    from fastapi.responses import JSONResponse
+    if not _valid_hevy_id(hevy_id):
+        return JSONResponse({"ok": False, "error": "Invalid workout ID"}, status_code=400)
+    form = await request.form()
+    if form.get("confirm") != hevy_id:
+        return JSONResponse({"ok": False, "error": "Explicit confirmation required"}, status_code=400)
+    store = db.get_db()
+    pending = store.get_pending(hevy_id)
+    if not pending or pending.get("phase") != "failed":
+        return JSONResponse({"ok": False, "error": "Only definitively rejected uploads can be retried"}, status_code=409)
+    try:
+        from hevy2garmin.garmin import get_client
+        from hevy2garmin.sync import reconcile_pending, sync_one_workout
+        config = load_config(); client = get_client(config.get("garmin_email"))
+        reconcile_pending(store, client, hevy_id)
+        pending = store.get_pending(hevy_id)
+        if not pending or pending.get("phase") != "failed":
+            return JSONResponse({"ok": False, "error": "Operation is no longer retryable"}, status_code=409)
+        workout = (pending.get("payload") or {}).get("workout")
+        if not workout:
+            return JSONResponse({"ok": False, "error": "Stored workout payload is unavailable"}, status_code=409)
+        store.delete_pending(hevy_id)
+        result = sync_one_workout(workout, cfg=config, garmin_client=client, force_upload=True, respect_grace=False, database=store)
+        return JSONResponse({"ok": True, "status": result.status})
+    except Exception as exc:
+        return JSONResponse({"ok": False, "error": str(exc)[:1000]}, status_code=502)
+
+
+@app.post("/api/pending/{hevy_id}/abandon")
+async def api_abandon_pending(request: Request, hevy_id: str):
+    from fastapi.responses import JSONResponse
+    if not _valid_hevy_id(hevy_id):
+        return JSONResponse({"ok": False, "error": "Invalid workout ID"}, status_code=400)
+    form = await request.form()
+    if form.get("confirm") != hevy_id:
+        return JSONResponse({"ok": False, "error": "Explicit confirmation required"}, status_code=400)
+    if not db.delete_pending(hevy_id):
+        return JSONResponse({"ok": False, "error": "No pending operation"}, status_code=404)
+    logger.warning("ABANDONED pending Garmin upload for %s from web UI; an orphan may still appear", hevy_id)
+    return JSONResponse({"ok": True})
+
+
+async def _manual_terminal(request: Request, hevy_id: str, status: str):
+    from fastapi.responses import JSONResponse
+    if not _valid_hevy_id(hevy_id):
+        return JSONResponse({"ok": False, "error": "Invalid workout ID"}, status_code=400)
+    form = await request.form(); store = db.get_db()
+    pending = store.get_pending(hevy_id)
+    if pending and form.get("confirm") != hevy_id:
+        return JSONResponse({"ok": False, "error": "Pending upload confirmation required"}, status_code=409)
+    reason = str(form.get("reason") or "")[:1000]
+    garmin_id = None
+    if status == "manual" and form.get("garmin_id"):
+        raw_id = str(form.get("garmin_id"))
+        if not raw_id.isdigit() or int(raw_id) <= 0:
+            return JSONResponse({"ok": False, "error": "Garmin ID must be a positive integer"}, status_code=400)
+        garmin_id = raw_id
+    store.resolve_terminal(hevy_id, status=status, garmin_activity_id=garmin_id, reason=reason, source="web")
+    _clear_workout_cache(store)
+    return JSONResponse({"ok": True, "status": status})
+
+
+@app.post("/api/workout/{hevy_id}/mark-synced")
+async def api_mark_synced(request: Request, hevy_id: str):
+    return await _manual_terminal(request, hevy_id, "manual")
+
+
+@app.post("/api/workout/{hevy_id}/skip")
+async def api_skip_workout(request: Request, hevy_id: str):
+    return await _manual_terminal(request, hevy_id, "skipped")
 
 
 @app.post("/api/unsync-all")
@@ -1753,7 +1980,9 @@ async def _do_sync_one(request: Request, *, respect_grace: bool = False):
 
     # Skip ids that are already failed this session, or deferred by grace this
     # invocation (cron continues to the next older unsynced workout).
-    skip_ids = set(_failed_ids)
+    pending_rows = _db.list_pending()
+    pending_ids = {row["hevy_id"] for row in pending_rows}
+    skip_ids = set(_failed_ids) | pending_ids
     deferred_count = 0
     unsynced = None
     unmapped_found: dict[str, int] = {}
@@ -1776,7 +2005,11 @@ async def _do_sync_one(request: Request, *, respect_grace: bool = False):
                     "remaining": remaining,
                     "done": remaining <= 0,
                 })
-            return JSONResponse({"synced": 0, "remaining": 0, "done": True})
+            remaining = max(0, total_count - db.get_synced_count())
+            return JSONResponse({
+                "synced": 0, "processing": len(pending_ids),
+                "remaining": remaining, "done": remaining <= len(pending_ids),
+            })
 
         # Defer before Garmin auth when possible (cron cold starts).
         grace_minutes = config.get("sync", {}).get("grace_period_minutes", 120)
@@ -1806,6 +2039,15 @@ async def _do_sync_one(request: Request, *, respect_grace: bool = False):
                 respect_grace=False,  # already checked above
                 database=db.get_db(),
             )
+
+            if one.status != "synced":
+                return JSONResponse({
+                    "synced": 0,
+                    one.status: 1,
+                    "title": unsynced["title"],
+                    "remaining": max(0, hevy.get_workout_count() - db.get_synced_count()),
+                    "done": False,
+                })
 
             remaining = hevy.get_workout_count() - db.get_synced_count()
             payload = {

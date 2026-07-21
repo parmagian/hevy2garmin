@@ -4,7 +4,7 @@
 {% block content %}
 <div class="page-header">
     <h1>Sync History</h1>
-    <p>{{ total }} workouts synced</p>
+    <p>{{ total }} workouts resolved</p>
 </div>
 
 {% if history %}
@@ -28,9 +28,9 @@
                 <td style="text-align: right; font-variant-numeric: tabular-nums; color: var(--text-secondary);">{{ h.calories or '—' }}</td>
                 <td style="text-align: right; font-variant-numeric: tabular-nums; color: var(--text-secondary);">{{ h.avg_hr or '—' }}</td>
                 <td style="font-variant-numeric: tabular-nums; color: var(--text-muted); font-size: 13px;">{{ h.garmin_activity_id or '—' }}</td>
-                <td><span class="badge badge-success">
+                <td><span class="badge {% if (h.status or 'success') == 'success' %}badge-success{% endif %}">
                     <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><polyline points="20 6 9 17 4 12"/></svg>
-                    {{ h.status }}
+                    {% if (h.status or 'success') == 'manual' %}Marked as synced{% elif h.status == 'skipped' %}Skipped{% else %}Uploaded{% endif %}
                 </span></td>
             </tr>
             {% endfor %}

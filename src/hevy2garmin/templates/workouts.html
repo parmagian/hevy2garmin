@@ -151,6 +151,16 @@
                     <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><polyline points="20 6 9 17 4 12"/></svg>
                     On Garmin{% if w.garmin_match and w.garmin_match.garmin_name %} as "{{ w.garmin_match.garmin_name }}"{% endif %}
                 </span>
+                {% elif w.status == 'manual' %}
+                <span class="badge badge-success">Marked as synced</span>
+                {% elif w.status == 'skipped' %}
+                <span class="badge" style="background: rgba(100,116,139,.15); color: #94a3b8;">Skipped</span>
+                {% elif w.status == 'processing' %}
+                <span class="badge" style="background: rgba(59,130,246,.15); color: #60a5fa;">Processing</span>
+                {% elif w.status == 'needs_review' %}
+                <span class="badge" style="background: rgba(251,191,36,.15); color: #fbbf24;">Needs review</span>
+                {% elif w.status == 'failed' %}
+                <span class="badge" style="background: rgba(239,68,68,.15); color: #f87171;">Sync failed</span>
                 {% else %}
                 <span class="badge badge-pending">Not on Garmin</span>
                 {% endif %}
@@ -159,6 +169,11 @@
                 {{ w.start_time[:10] }} at {{ w.start_time[11:16] }}
                 &middot; {{ w.exercises|length }} exercises
             </div>
+            {% if w.state_detail and (w.state_detail.reason or w.state_detail.last_error) %}
+            <div style="font-size: 12px; color: var(--text-muted); margin: -4px 0 10px; max-width: 760px;">
+                {{ w.state_detail.reason or w.state_detail.last_error }}
+            </div>
+            {% endif %}
             <!-- Source links -->
             <div style="display: flex; gap: 8px; margin-bottom: 10px;">
                 <a href="https://hevy.com/workout/{{ w.id }}" target="_blank" rel="noopener"
@@ -182,14 +197,25 @@
                     Re-sync
                 </button>
                 {% endif %}
-                {% if w.status == 'uploaded' %}
+                {% if w.status in ('uploaded', 'manual', 'skipped') %}
                 <button type="button"
                     onclick="unsyncWorkout('{{ w.id }}', this)"
                     style="display: inline-flex; align-items: center; gap: 4px; padding: 3px 10px; border-radius: 6px; font-size: 12px; font-weight: 600; background: rgba(239,68,68,0.12); color: #f87171; border: none; cursor: pointer;"
                     title="Remove sync record so this workout can be re-synced">
                     <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M3 6h18M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
-                    Unsync
+                    Reset
                 </button>
+                {% endif %}
+                {% if w.status in ('processing', 'needs_review') %}
+                <button type="button" onclick="pendingAction('{{ w.id }}', 'reconcile', this)" class="btn btn-secondary btn-sm">Reconcile</button>
+                <button type="button" onclick="pendingAction('{{ w.id }}', 'abandon', this)" class="btn btn-secondary btn-sm" style="color:#f87171;">Abandon</button>
+                {% elif w.status == 'failed' %}
+                <button type="button" onclick="pendingAction('{{ w.id }}', 'retry', this)" class="btn btn-secondary btn-sm">Retry</button>
+                <button type="button" onclick="pendingAction('{{ w.id }}', 'abandon', this)" class="btn btn-secondary btn-sm" style="color:#f87171;">Abandon</button>
+                {% endif %}
+                {% if w.status in ('pending', 'processing', 'needs_review', 'failed') %}
+                <button type="button" onclick="manualAction('{{ w.id }}', 'mark-synced', this)" class="btn btn-secondary btn-sm">Mark synced</button>
+                <button type="button" onclick="manualAction('{{ w.id }}', 'skip', this)" class="btn btn-secondary btn-sm">Skip</button>
                 {% endif %}
             </div>
             <!-- Exercise details -->
@@ -507,6 +533,50 @@ async function resyncWorkout(hevyId, btn) {
         alert('Network error: ' + e.message);
         btn.disabled = false;
         btn.textContent = 'Re-sync';
+    }
+}
+
+async function pendingAction(hevyId, action, btn) {
+    const warnings = {
+        retry: 'Retry this definitively rejected upload?',
+        abandon: 'Abandon this pending operation? A delayed Garmin upload may still appear later.',
+        reconcile: 'Check Garmin and resume this operation without uploading again?'
+    };
+    if (!confirm(warnings[action])) return;
+    btn.disabled = true;
+    const form = new FormData();
+    if (action === 'retry' || action === 'abandon') form.append('confirm', hevyId);
+    try {
+        const resp = await fetch('/api/pending/' + encodeURIComponent(hevyId) + '/' + action, {method: 'POST', body: form});
+        const data = await resp.json();
+        if (!resp.ok || !data.ok) throw new Error(data.error || 'Operation failed');
+        window.location.reload();
+    } catch (e) {
+        alert(e.message); btn.disabled = false;
+    }
+}
+
+async function manualAction(hevyId, action, btn) {
+    const label = action === 'skip' ? 'skip' : 'mark as synced';
+    if (!confirm('Manually ' + label + ' this workout? If an upload is pending, a delayed Garmin activity may still appear.')) return;
+    const reason = prompt('Optional reason:', '');
+    if (reason === null) return;
+    const form = new FormData();
+    form.append('reason', reason.slice(0, 1000));
+    form.append('confirm', hevyId);
+    if (action === 'mark-synced') {
+        const garminId = prompt('Optional Garmin activity ID:', '');
+        if (garminId === null) return;
+        if (garminId) form.append('garmin_id', garminId);
+    }
+    btn.disabled = true;
+    try {
+        const resp = await fetch('/api/workout/' + encodeURIComponent(hevyId) + '/' + action, {method: 'POST', body: form});
+        const data = await resp.json();
+        if (!resp.ok || !data.ok) throw new Error(data.error || 'Operation failed');
+        window.location.reload();
+    } catch (e) {
+        alert(e.message); btn.disabled = false;
     }
 }
 

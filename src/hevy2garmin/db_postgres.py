@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from datetime import datetime
+from hevy2garmin._isotime import parse_iso
 
 from hevy2garmin.db_interface import Database
 
@@ -11,8 +12,8 @@ from hevy2garmin.db_interface import Database
 def _ts_newer(new_ts: str, old_ts: str) -> bool:
     """Compare ISO timestamps safely (handles Z vs +00:00 differences)."""
     try:
-        new_dt = datetime.fromisoformat(new_ts.replace("Z", "+00:00"))
-        old_dt = datetime.fromisoformat(old_ts.replace("Z", "+00:00"))
+        new_dt = parse_iso(new_ts)
+        old_dt = parse_iso(old_ts)
         return new_dt > old_dt
     except (ValueError, TypeError):
         return new_ts > old_ts  # fallback to string comparison
@@ -78,6 +79,25 @@ class PostgresDatabase(Database):
                     )
                 """)
                 cur.execute("""
+                    CREATE TABLE IF NOT EXISTS pending_uploads (
+                        hevy_id TEXT PRIMARY KEY,
+                        phase TEXT NOT NULL,
+                        next_step TEXT,
+                        upload_id TEXT,
+                        garmin_activity_id TEXT,
+                        watch_activity_id TEXT,
+                        pre_upload_ids JSONB NOT NULL DEFAULT '[]',
+                        payload JSONB NOT NULL DEFAULT '{}',
+                        resolution_source TEXT,
+                        attempt_count INTEGER NOT NULL DEFAULT 0,
+                        delete_attempt_count INTEGER NOT NULL DEFAULT 0,
+                        last_error TEXT,
+                        locked_until TIMESTAMPTZ,
+                        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                    )
+                """)
+                cur.execute("""
                     CREATE TABLE IF NOT EXISTS platform_credentials (
                         platform VARCHAR(50) PRIMARY KEY,
                         auth_type VARCHAR(20) NOT NULL DEFAULT 'oauth',
@@ -94,16 +114,11 @@ class PostgresDatabase(Database):
                         subcategory INTEGER NOT NULL DEFAULT 0
                     )
                 """)
-                # Migration: add hevy_updated_at if missing
-                try:
-                    cur.execute("ALTER TABLE synced_workouts ADD COLUMN hevy_updated_at TEXT")
-                except Exception:
-                    conn.rollback()
-                # Migration: add sync_method column (merge mode)
-                try:
-                    cur.execute("ALTER TABLE synced_workouts ADD COLUMN sync_method TEXT DEFAULT 'upload'")
-                except Exception:
-                    conn.rollback()
+                cur.execute("ALTER TABLE synced_workouts ADD COLUMN IF NOT EXISTS hevy_updated_at TEXT")
+                cur.execute("ALTER TABLE synced_workouts ADD COLUMN IF NOT EXISTS sync_method TEXT DEFAULT 'upload'")
+                cur.execute("ALTER TABLE synced_workouts ADD COLUMN IF NOT EXISTS resolution_reason TEXT")
+                cur.execute("ALTER TABLE synced_workouts ADD COLUMN IF NOT EXISTS resolved_at TIMESTAMPTZ")
+                cur.execute("ALTER TABLE synced_workouts ADD COLUMN IF NOT EXISTS resolution_source TEXT")
                 cur.execute("""
                     CREATE TABLE IF NOT EXISTS app_cache (
                         key TEXT PRIMARY KEY,
@@ -111,6 +126,19 @@ class PostgresDatabase(Database):
                         updated_at TIMESTAMPTZ DEFAULT NOW()
                     )
                 """)
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS synced_routines (
+                        hevy_routine_id TEXT PRIMARY KEY,
+                        garmin_workout_id TEXT,
+                        title TEXT,
+                        hevy_updated_at TEXT,
+                        scheduled_date TEXT,
+                        content_hash TEXT,
+                        synced_at TIMESTAMPTZ DEFAULT NOW(),
+                        status VARCHAR(20) DEFAULT 'success'
+                    )
+                """)
+                cur.execute("ALTER TABLE synced_routines ADD COLUMN IF NOT EXISTS content_hash TEXT")
             conn.commit()
 
     def is_synced(self, hevy_id: str) -> bool:
@@ -141,6 +169,86 @@ class PostgresDatabase(Database):
                 row = cur.fetchone()
                 return row["garmin_activity_id"] if row else None
 
+    # ── Routine → Garmin planned-workout tracking ───────────────────────────
+    def get_synced_routine(self, hevy_routine_id: str) -> dict | None:
+        with self._get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT hevy_routine_id, garmin_workout_id, title, hevy_updated_at, "
+                    "scheduled_date, content_hash, synced_at, status FROM synced_routines "
+                    "WHERE hevy_routine_id = %s",
+                    (hevy_routine_id,),
+                )
+                row = cur.fetchone()
+                return dict(row) if row else None
+
+    def is_routine_synced(self, hevy_routine_id: str, hevy_updated_at: str | None = None) -> bool:
+        record = self.get_synced_routine(hevy_routine_id)
+        if record is None:
+            return False
+        if hevy_updated_at and record.get("hevy_updated_at"):
+            return not _ts_newer(hevy_updated_at, record["hevy_updated_at"])
+        return True
+
+    def mark_routine_synced(
+        self,
+        hevy_routine_id: str,
+        garmin_workout_id: str | None = None,
+        title: str = "",
+        hevy_updated_at: str | None = None,
+        scheduled_date: str | None = None,
+        content_hash: str | None = None,
+        status: str = "success",
+    ) -> None:
+        with self._get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO synced_routines
+                        (hevy_routine_id, garmin_workout_id, title, hevy_updated_at, scheduled_date, content_hash, status)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s)
+                    ON CONFLICT (hevy_routine_id) DO UPDATE SET
+                        garmin_workout_id = EXCLUDED.garmin_workout_id,
+                        title = EXCLUDED.title,
+                        hevy_updated_at = EXCLUDED.hevy_updated_at,
+                        scheduled_date = EXCLUDED.scheduled_date,
+                        content_hash = EXCLUDED.content_hash,
+                        synced_at = NOW(),
+                        status = EXCLUDED.status
+                    """,
+                    (hevy_routine_id, garmin_workout_id, title, hevy_updated_at, scheduled_date, content_hash, status),
+                )
+            conn.commit()
+
+    def delete_synced_routine(self, hevy_routine_id: str) -> bool:
+        with self._get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "DELETE FROM synced_routines WHERE hevy_routine_id = %s", (hevy_routine_id,)
+                )
+                deleted = cur.rowcount > 0
+            conn.commit()
+            return deleted
+
+    def get_routine_stats(self) -> dict:
+        with self._get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT COUNT(*) AS synced, COUNT(scheduled_date) AS scheduled FROM synced_routines"
+                )
+                row = cur.fetchone()
+                return {"synced": row["synced"] or 0, "scheduled": row["scheduled"] or 0}
+
+    def get_recent_synced_routines(self, limit: int = 5) -> list[dict]:
+        with self._get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT hevy_routine_id, title, scheduled_date, garmin_workout_id, synced_at "
+                    "FROM synced_routines ORDER BY synced_at DESC LIMIT %s",
+                    (limit,),
+                )
+                return [dict(r) for r in cur.fetchall()]
+
     def mark_synced(
         self,
         hevy_id: str,
@@ -164,6 +272,7 @@ class PostgresDatabase(Database):
                         avg_hr = EXCLUDED.avg_hr,
                         hevy_updated_at = EXCLUDED.hevy_updated_at,
                         sync_method = EXCLUDED.sync_method,
+                        status = 'success',
                         synced_at = NOW()
                     """,
                     (hevy_id, garmin_activity_id, title, calories, avg_hr, hevy_updated_at, sync_method),
@@ -287,6 +396,126 @@ class PostgresDatabase(Database):
                     (key, json.dumps(value)),
                 )
             conn.commit()
+
+    def claim_pending(self, hevy_id: str, payload: dict) -> bool:
+        with self._get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    INSERT INTO pending_uploads (hevy_id, phase, payload)
+                    VALUES (%s, 'preparing', %s) ON CONFLICT (hevy_id) DO NOTHING
+                """, (hevy_id, json.dumps(payload)))
+                claimed = cur.rowcount == 1
+            conn.commit()
+        return claimed
+
+    @staticmethod
+    def _pending_dict(row) -> dict:
+        result = dict(row)
+        for key, empty in (("pre_upload_ids", []), ("payload", {})):
+            if isinstance(result.get(key), str):
+                result[key] = json.loads(result[key])
+            elif result.get(key) is None:
+                result[key] = empty
+        return result
+
+    def get_pending(self, hevy_id: str) -> dict | None:
+        with self._get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT * FROM pending_uploads WHERE hevy_id=%s", (hevy_id,))
+                row = cur.fetchone()
+                return self._pending_dict(row) if row else None
+
+    def list_pending(self) -> list[dict]:
+        with self._get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT * FROM pending_uploads ORDER BY created_at DESC")
+                return [self._pending_dict(row) for row in cur.fetchall()]
+
+    def update_pending(self, hevy_id: str, **changes) -> None:
+        allowed = {"phase", "next_step", "upload_id", "garmin_activity_id", "watch_activity_id", "pre_upload_ids", "payload", "resolution_source", "attempt_count", "delete_attempt_count", "last_error", "locked_until"}
+        changes = {k: v for k, v in changes.items() if k in allowed}
+        if not changes:
+            return
+        for key in ("pre_upload_ids", "payload"):
+            if key in changes:
+                changes[key] = json.dumps(changes[key])
+        assignments = ", ".join(f"{key}=%s" for key in changes)
+        with self._get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(f"UPDATE pending_uploads SET {assignments}, updated_at=NOW() WHERE hevy_id=%s", (*changes.values(), hevy_id))
+            conn.commit()
+
+    def delete_pending(self, hevy_id: str) -> bool:
+        with self._get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute("DELETE FROM pending_uploads WHERE hevy_id=%s", (hevy_id,)); deleted = cur.rowcount > 0
+            conn.commit()
+        return deleted
+
+    def complete_pending(self, hevy_id: str, terminal: dict) -> None:
+        with self._get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    INSERT INTO synced_workouts
+                      (hevy_id, garmin_activity_id, title, calories, avg_hr, hevy_updated_at, sync_method, status)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,'success')
+                    ON CONFLICT (hevy_id) DO UPDATE SET garmin_activity_id=EXCLUDED.garmin_activity_id,
+                      title=EXCLUDED.title, calories=EXCLUDED.calories, avg_hr=EXCLUDED.avg_hr,
+                      hevy_updated_at=EXCLUDED.hevy_updated_at, sync_method=EXCLUDED.sync_method,
+                      status='success', synced_at=NOW()
+                """, (hevy_id, terminal.get("garmin_activity_id"), terminal.get("title", ""), terminal.get("calories"), terminal.get("avg_hr"), terminal.get("hevy_updated_at"), terminal.get("sync_method", "upload")))
+                cur.execute("DELETE FROM pending_uploads WHERE hevy_id=%s", (hevy_id,))
+            conn.commit()
+
+    def resolve_terminal(self, hevy_id: str, *, status: str, garmin_activity_id: str | None = None, reason: str | None = None, source: str | None = None) -> None:
+        if status not in {"manual", "skipped"}:
+            raise ValueError("manual resolution status must be manual or skipped")
+        with self._get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    INSERT INTO synced_workouts (hevy_id, garmin_activity_id, status, resolution_reason, resolved_at, resolution_source)
+                    VALUES (%s,%s,%s,%s,NOW(),%s)
+                    ON CONFLICT (hevy_id) DO UPDATE SET garmin_activity_id=EXCLUDED.garmin_activity_id,
+                      status=EXCLUDED.status, resolution_reason=EXCLUDED.resolution_reason,
+                      resolved_at=NOW(), resolution_source=EXCLUDED.resolution_source, synced_at=NOW()
+                """, (hevy_id, garmin_activity_id, status, reason, source))
+                cur.execute("DELETE FROM pending_uploads WHERE hevy_id=%s", (hevy_id,))
+            conn.commit()
+
+    def get_workout_states(self, hevy_ids: list[str]) -> dict[str, dict]:
+        if not hevy_ids:
+            return {}
+        with self._get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT hevy_id, status, garmin_activity_id, resolution_reason, resolution_source FROM synced_workouts WHERE hevy_id = ANY(%s)", (hevy_ids,))
+                states = {
+                    row["hevy_id"]: {
+                        "kind": "terminal", "status": row["status"] or "success",
+                        "garmin_activity_id": row["garmin_activity_id"],
+                        "reason": row["resolution_reason"], "source": row["resolution_source"],
+                    }
+                    for row in cur.fetchall()
+                }
+                cur.execute("SELECT hevy_id, phase, next_step, last_error, attempt_count, delete_attempt_count, garmin_activity_id FROM pending_uploads WHERE hevy_id = ANY(%s)", (hevy_ids,))
+                for row in cur.fetchall():
+                    if row["hevy_id"] not in states:
+                        states[row["hevy_id"]] = {
+                            "kind": "pending", "status": row["phase"],
+                            "next_step": row["next_step"], "last_error": row["last_error"],
+                            "attempt_count": row["attempt_count"],
+                            "delete_attempt_count": row["delete_attempt_count"],
+                            "garmin_activity_id": row["garmin_activity_id"],
+                        }
+                return states
+
+    def get_terminal_counts(self) -> dict[str, int]:
+        with self._get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT COALESCE(status, 'success') AS status, COUNT(*) AS count FROM synced_workouts GROUP BY COALESCE(status, 'success')")
+                raw = {row["status"]: row["count"] for row in cur.fetchall()}
+        result = {"uploaded": raw.get("success", 0), "manual": raw.get("manual", 0), "skipped": raw.get("skipped", 0)}
+        result["terminal"] = sum(result.values())
+        return result
 
     def get_custom_mappings(self) -> dict[str, tuple[int, int]]:
         with self._get_conn() as conn:
