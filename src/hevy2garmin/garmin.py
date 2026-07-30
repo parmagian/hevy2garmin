@@ -421,7 +421,14 @@ def create_workout(client: Garmin, payload: dict) -> int | None:
 
 
 def list_workouts(client: Garmin, limit: int = 100) -> list[dict]:
-    """List the user's saved Garmin workouts (for idempotency / reconciliation)."""
+    """List the user's saved Garmin workouts (for idempotency / reconciliation).
+
+    Raises on a non-list 2xx body (an error envelope or a shape drift) so callers
+    treat it as "unknown" rather than an empty library. Reading an error-as-200 as
+    ``[]`` would make routine reconciliation flag every synced routine as deleted on
+    Garmin. Both callers wrap this in a best-effort try/except, so a raise degrades
+    to the last-known DB state instead of acting on a false empty listing.
+    """
     time.sleep(1.0)  # manual rate limit
     resp = client.client.request(
         "GET",
@@ -429,7 +436,12 @@ def list_workouts(client: Garmin, limit: int = 100) -> list[dict]:
         f"/workout-service/workouts?start=1&limit={limit}&myWorkoutsOnly=true",
     )
     data = resp.json() if hasattr(resp, "json") else resp
-    return data if isinstance(data, list) else []
+    if not isinstance(data, list):
+        raise RuntimeError(
+            f"Garmin workout listing returned a {type(data).__name__}, not a list; "
+            "treating as unknown rather than empty"
+        )
+    return data
 
 
 def delete_workout(client: Garmin, workout_id: int | str) -> None:
@@ -441,16 +453,36 @@ def delete_workout(client: Garmin, workout_id: int | str) -> None:
     logger.info("  Deleted Garmin workout %s", workout_id)
 
 
-def schedule_workout(client: Garmin, workout_id: int | str, date: str) -> None:
-    """Schedule a saved Garmin workout onto the calendar for ``date`` (YYYY-MM-DD)."""
+def schedule_workout(client: Garmin, workout_id: int | str, date: str) -> int | None:
+    """Schedule a saved Garmin workout onto the calendar for ``date`` (YYYY-MM-DD).
+
+    Returns the ``workoutScheduleId`` Garmin assigns to the new calendar entry so
+    the caller can track and later unschedule it (Garmin appends a fresh entry on
+    every POST — it does not dedup server-side). Returns ``None`` if the response
+    carries no parseable id, so scheduling still succeeds even if the shape drifts.
+    """
     time.sleep(1.0)  # manual rate limit
-    client.client.request(
+    resp = client.client.request(
         "POST",
         "connectapi",
         f"/workout-service/schedule/{workout_id}",
         json={"date": date},
     )
     logger.info("  Scheduled Garmin workout %s for %s", workout_id, date)
+    try:
+        data = resp.json() if hasattr(resp, "json") else resp
+        return data.get("workoutScheduleId") if isinstance(data, dict) else None
+    except Exception:
+        return None
+
+
+def unschedule_workout(client: Garmin, scheduled_id: int | str) -> None:
+    """Remove a calendar entry (``workoutScheduleId``) without deleting the workout."""
+    time.sleep(1.0)  # manual rate limit
+    client.client.request(
+        "DELETE", "connectapi", f"/workout-service/schedule/{scheduled_id}"
+    )
+    logger.info("  Unscheduled Garmin calendar entry %s", scheduled_id)
 
 
 def generate_description(workout: dict, calories: int | None = None, avg_hr: int | None = None) -> str:
