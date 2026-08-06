@@ -30,6 +30,12 @@ DEFAULT_CONFIG: dict[str, Any] = {
         # uploading a duplicate. 0 = sync immediately (old behavior). Applies to
         # automatic runs only; manual "sync now" bypasses it.
         "grace_period_minutes": 120,
+        # Unit the weights in a synced *routine* are expressed in on Garmin.
+        # Hevy's API always reports kilograms, so "pound" converts on the way
+        # out (see routine._weight_fields). Logged workouts are unaffected:
+        # their FIT payload is kg by spec and Garmin renders it per the
+        # account's display preference.
+        "weight_unit": "kilogram",
     },
     "auto_sync": {
         "enabled": False,
@@ -95,7 +101,7 @@ def load_config() -> dict[str, Any]:
                                 if creds.get("password"):
                                     config["garmin_password"] = creds["password"]
                         # App settings
-                        cur.execute("SELECT key, value FROM app_cache WHERE key IN ('user_profile', 'timing', 'hr_fusion', 'merge_settings')")
+                        cur.execute("SELECT key, value FROM app_cache WHERE key IN ('user_profile', 'timing', 'hr_fusion', 'sync', 'merge_settings')")
                         for row in cur.fetchall():
                             val = row["value"] if isinstance(row["value"], dict) else json.loads(row["value"])
                             if row["key"] == "merge_settings":
@@ -155,7 +161,7 @@ def save_config(config: dict[str, Any]) -> None:
 
         _db = get_db()
         if hasattr(_db, "set_app_config"):
-            for key in ("user_profile", "timing", "hr_fusion"):
+            for key in ("user_profile", "timing", "hr_fusion", "sync"):
                 value = config.get(key)
                 if isinstance(value, dict):
                     _db.set_app_config(key, value)

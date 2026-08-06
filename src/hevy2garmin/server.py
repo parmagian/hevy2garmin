@@ -1222,6 +1222,7 @@ async def settings_save(
     merge_max_drift_min: int = Form(20),
     merge_extra_types: str = Form(""),
     merge_watch_strategy: str = Form("replace"),
+    weight_unit: str = Form("kilogram"),
 ):
     if is_demo_mode():
         return HTMLResponse('<div class="toast toast-error">Settings are read-only in demo mode</div>')
@@ -1240,6 +1241,9 @@ async def settings_save(
         rest_between_exercises_seconds=rest_between_exercises_seconds,
     )
     config.setdefault("hr_fusion", {})["enabled"] = hr_fusion_enabled == "on"
+    config.setdefault("sync", {})["weight_unit"] = (
+        weight_unit if weight_unit in ("kilogram", "pound") else "kilogram"
+    )
     config["merge_mode"] = merge_mode == "on"
     config["description_enabled"] = description_enabled == "on"
     config["merge_overlap_pct"] = max(50, min(95, merge_overlap_pct))
@@ -1262,6 +1266,7 @@ async def settings_save(
             _db.set_app_config("user_profile", config["user_profile"])
             _db.set_app_config("timing", config["timing"])
             _db.set_app_config("hr_fusion", config.get("hr_fusion", {}))
+            _db.set_app_config("sync", config.get("sync", {}))
             _db.set_app_config("merge_settings", {
                 "merge_mode": config["merge_mode"],
                 "description_enabled": config["description_enabled"],

@@ -243,6 +243,24 @@
 
                 <hr style="border: none; border-top: 1px solid var(--border); margin: 20px 0;">
 
+                <!-- Routines -->
+                <p class="section-description" style="font-weight: 600; color: var(--text-secondary);">Routines</p>
+                <p class="section-description">Controls how Hevy routines are written to Garmin as planned workouts.</p>
+                <div class="form-grid">
+                    <div class="form-group">
+                        <label class="form-label" for="weight_unit">Weight unit</label>
+                        <select class="form-input" id="weight_unit" name="weight_unit">
+                            <option value="kilogram" {{ 'selected' if config.get('sync', {}).get('weight_unit', 'kilogram') == 'kilogram' }}>Kilograms (kg)</option>
+                            <option value="pound" {{ 'selected' if config.get('sync', {}).get('weight_unit', 'kilogram') == 'pound' }}>Pounds (lb)</option>
+                        </select>
+                        <div class="form-hint">
+                            The unit each set's target weight is labelled with on Garmin. Hevy's API always reports kilograms, so choosing <strong>Pounds</strong> converts them on the way out. Changing this makes every already-synced routine show as out of date, since the payload Garmin receives changes. Logged workouts are not affected — those follow your Garmin account's display preference.
+                        </div>
+                    </div>
+                </div>
+
+                <hr style="border: none; border-top: 1px solid var(--border); margin: 20px 0;">
+
                 <!-- FIT Timing -->
                 <p class="section-description" style="font-weight: 600; color: var(--text-secondary);">FIT File Timing</p>
                 <p class="section-description">Controls how set durations are estimated in the FIT file when exact timing is not available from Hevy.</p>
