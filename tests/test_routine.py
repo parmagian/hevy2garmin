@@ -113,10 +113,25 @@ class TestRoutineToGarminWorkout:
         assert "weightValue" not in steps[2]
 
     def test_pound_conversion(self) -> None:
+        """Pounds change the number, never the unit object.
+
+        Garmin labels by the account's measurement preference and ignores
+        unitKey; sending the pound unit makes it scale by the pound-to-gram
+        factor instead (45 lb rendered as "20411 lbs").
+        """
         payload = routine_to_garmin_workout(self._routine(), weight_unit="pound")
         step = payload["workoutSegments"][0]["workoutSteps"][1]  # 60 kg working set
-        assert step["weightUnit"]["unitKey"] == "pound"
+        assert step["weightUnit"] == {"unitId": 8, "unitKey": "kilogram"}
         assert step["weightValue"] == round(60 * 2.2046226218, 2)
+
+    def test_pound_never_emits_the_pound_unit(self) -> None:
+        """Regression guard: no step may carry unitId 7 / unitKey 'pound'."""
+        payload = routine_to_garmin_workout(self._routine(), weight_unit="pound")
+        for step in payload["workoutSegments"][0]["workoutSteps"]:
+            unit = step.get("weightUnit")
+            if unit is not None:
+                assert unit["unitKey"] != "pound"
+                assert unit["unitId"] != 7
 
     def test_duration_based_step(self) -> None:
         routine = {"title": "Core", "exercises": [

@@ -54,15 +54,20 @@ class TestHashInputsResolution:
         assert weight_unit == "kilogram"
 
     def test_end_to_end_pound_payload(self) -> None:
-        """The resolved unit must actually reach the Garmin payload."""
+        """The resolved unit must actually reach the Garmin payload.
+
+        Only the number changes. Garmin labels weights with the account's
+        measurement preference and ignores unitKey, so the unit object stays
+        kilogram — sending the pound unit makes Garmin scale by the
+        pound-to-gram factor (45 lb rendered as "20411 lbs").
+        """
         cfg = {"sync": {"weight_unit": "pound"}}
         weight_unit, default_rest = _hash_inputs(cfg)
         payload = routine_to_garmin_workout(
             _routine(), weight_unit=weight_unit, default_rest_seconds=default_rest
         )
         step = _weight_steps(payload)[0]
-        assert step["weightUnit"]["unitKey"] == "pound"
-        assert step["weightUnit"]["unitId"] == 7
+        assert step["weightUnit"] == {"unitId": 8, "unitKey": "kilogram"}
         assert step["weightValue"] == 220.46  # 100 kg, Hevy always reports kg
 
 

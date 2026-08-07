@@ -12,7 +12,23 @@ were **validated on 2026-07-16** by diffing a workout created by this builder
 against a strength workout hand-authored in Garmin Connect (via
 ``client.get_workout_by_id``): Garmin accepted and stored every field verbatim,
 and ``weightValue`` is in **kilograms** (not grams). Garmin fills in
-``weightUnit.factor`` and ``targetType`` itself, so we omit them. The exercise
+``weightUnit.factor`` and ``targetType`` itself, so we omit them.
+
+That validation covered kilograms only. Observed on 2026-08-06 against a
+Statute/US account, the display rule is:
+
+* Garmin ignores ``weightUnit.unitKey`` when labelling. It prints
+  ``weightValue`` verbatim and labels it with the account's measurement
+  preference — so ``20.41`` rendered as "20.4 lbs", not "20.41 kg".
+* Sending the pound unit (``unitId`` 7) is actively harmful: Garmin scales the
+  value by the pound-to-gram factor, so ``45.0`` became "20411 lbs"
+  (45 × 453.59237).
+
+So the unit object is always kilogram and only the *number* varies; see
+:func:`_weight_fields`. A user whose Garmin account is metric wants
+``weight_unit="kilogram"``, one on Statute/US wants ``"pound"``.
+
+The exercise
 ``category``/``exerciseName`` strings come from :func:`mapper.fit_exercise_strings`,
 which derives them from the FIT SDK enums fit-tool ships.
 
@@ -65,17 +81,29 @@ _END_TIME = {"conditionTypeId": 2, "conditionTypeKey": "time"}
 _END_LAP_BUTTON = {"conditionTypeId": 1, "conditionTypeKey": "lap.button"}
 
 _WEIGHT_UNIT_KG = {"unitId": 8, "unitKey": "kilogram"}
-_WEIGHT_UNIT_LB = {"unitId": 7, "unitKey": "pound"}
 _KG_TO_LB = 2.2046226218
+
+# There is deliberately no pound weightUnit constant. Garmin does NOT render
+# weightValue in the unit we name here — it prints the number verbatim and
+# labels it with the *account's* measurement preference (Connect > Display
+# Preferences). Sending {"unitId": 7, "unitKey": "pound"} additionally makes
+# Garmin scale the value by the pound-to-gram factor, so 45 lb was stored and
+# shown as "20411 lbs". Both branches below therefore emit the validated
+# kilogram unit object and vary only the *number*.
 
 
 def _weight_fields(set_data: dict, weight_unit: str) -> dict:
-    """Weight fields for a step, or empty when the set has no weight."""
+    """Weight fields for a step, or empty when the set has no weight.
+
+    ``weight_unit`` selects the number Garmin will display, not the label:
+    ``"pound"`` converts Hevy's kilograms so a Statute/US account reads the
+    right figure. See the module docstring for how this was determined.
+    """
     weight_kg = set_data.get("weight_kg")
     if weight_kg is None:
         return {}
     if weight_unit == "pound":
-        return {"weightValue": round(weight_kg * _KG_TO_LB, 2), "weightUnit": _WEIGHT_UNIT_LB}
+        return {"weightValue": round(weight_kg * _KG_TO_LB, 2), "weightUnit": _WEIGHT_UNIT_KG}
     return {"weightValue": float(weight_kg), "weightUnit": _WEIGHT_UNIT_KG}
 
 

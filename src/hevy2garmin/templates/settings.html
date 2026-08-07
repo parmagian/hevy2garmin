@@ -254,7 +254,7 @@
                             <option value="pound" {{ 'selected' if config.get('sync', {}).get('weight_unit', 'kilogram') == 'pound' }}>Pounds (lb)</option>
                         </select>
                         <div class="form-hint">
-                            The unit each set's target weight is labelled with on Garmin. Hevy's API always reports kilograms, so choosing <strong>Pounds</strong> converts them on the way out. Changing this makes every already-synced routine show as out of date, since the payload Garmin receives changes. Logged workouts are not affected — those follow your Garmin account's display preference.
+                            Set this to match <strong>Garmin Connect &rsaquo; Display Preferences &rsaquo; Measurement Units</strong>. Garmin labels planned-workout weights using that account setting and shows whatever number it is given, so a mismatch means correct-looking labels over wrong figures — a 135 lb bench reading "61 lbs". Hevy's API always reports kilograms, so <strong>Pounds</strong> converts them on the way out. Changing this makes every already-synced routine show as out of date, since the payload Garmin receives changes.
                         </div>
                     </div>
                 </div>
