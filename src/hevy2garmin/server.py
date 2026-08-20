@@ -1193,6 +1193,27 @@ async def workouts_page(request: Request):
     return _render("workouts.html", workouts=workouts, hr_fusion_enabled=hr_fusion, page=page, page_count=page_count, fetch_error=fetch_error)
 
 
+def _daily_hr_to_samples(daily_hr: object, start_ms: int, end_ms: int) -> list[dict]:
+    """Slice Garmin daily HR (``heartRateValues``) to a workout window.
+
+    Garmin returns ``{"heartRateValues": null}`` for a day with no wellness HR yet
+    (common for the current day, before all-day HR is populated), so the key is
+    present with value ``None`` and ``.get(..., [])`` does NOT fall back. Guard the
+    ``None`` before iterating so the endpoint returns an empty series instead of
+    crashing with "'NoneType' object is not iterable" (#326).
+    """
+    hr_values = daily_hr.get("heartRateValues") if isinstance(daily_hr, dict) else None
+    samples: list[dict] = []
+    for entry in hr_values or []:
+        if isinstance(entry, list) and len(entry) >= 2 and entry[1] is not None:
+            ts, bpm = entry[0], entry[1]
+            if start_ms - 60000 <= ts <= end_ms + 60000:  # ±1 min buffer
+                secs_from_start = (ts - start_ms) / 1000
+                samples.append({"time": max(0, secs_from_start), "hr": bpm})
+    samples.sort(key=lambda x: x["time"])
+    return samples
+
+
 @app.get("/api/workout/{hevy_id}/hr", response_class=HTMLResponse)
 async def api_workout_hr(request: Request, hevy_id: str):
     """Fetch HR data for a workout's matched Garmin activity. Returns JSON for Chart.js.
@@ -1252,17 +1273,7 @@ async def api_workout_hr(request: Request, hevy_id: str):
         # Fetch daily HR data and slice to workout window
         date_str = w_start[:10]
         daily_hr = limiter.call(garmin_client.get_heart_rates, date_str)
-        hr_values = daily_hr.get("heartRateValues", []) if isinstance(daily_hr, dict) else []
-
-        hr_samples = []
-        for entry in hr_values:
-            if isinstance(entry, list) and len(entry) >= 2 and entry[1] is not None:
-                ts, bpm = entry[0], entry[1]
-                if start_ms - 60000 <= ts <= end_ms + 60000:  # ±1 min buffer
-                    secs_from_start = (ts - start_ms) / 1000
-                    hr_samples.append({"time": max(0, secs_from_start), "hr": bpm})
-
-        hr_samples.sort(key=lambda x: x["time"])
+        hr_samples = _daily_hr_to_samples(daily_hr, start_ms, end_ms)
 
         # Build exercise segments — proportional to actual workout duration
         exercises = workout.get("exercises", [])
